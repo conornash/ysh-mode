@@ -1,1 +1,6 @@
 * ysh-mode
+** Install
+#+BEGIN_SRC emacs-lisp
+  (use-package ysh-mode
+    :straight (:host github :repo "conornash/ysh-mode"))
+#+end_src
