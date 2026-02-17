@@ -1,0 +1,491 @@
+;;; ysh-mode.el --- Major mode for YSH (Oils shell) -*- lexical-binding: t; -*-
+
+;; Author: Claude Code
+;; Version: 0.1.0
+;; Keywords: languages, shell
+;; URL: https://www.oilshell.org/
+;; Package-Requires: ((emacs "27.1"))
+
+;; YSH syntax highlighting based on the oils.vim Vim plugin.
+;; Covers: keywords, builtins, strings (5 kinds + triple-quoted variants),
+;; comments, variable substitutions, sigil pairs, expression atoms,
+;; proc/func definitions, backslash escapes, and J8 string escapes.
+
+;;; Commentary:
+
+;; YSH is the expression language in the Oils project (https://www.oilshell.org/).
+;; It extends shell with typed data, expressions, proc/func definitions,
+;; J8 strings, sigil pairs like $[] @[] ^[], and more.
+;;
+;; This mode provides syntax highlighting modeled after the oils.vim plugin at:
+;; https://github.com/oilshell/oil.vim
+
+(require 'rx)
+
+;; ---------------------------------------------------------------------
+;; Custom faces — mirroring the Vim highlight groups
+;; ---------------------------------------------------------------------
+
+(defgroup ysh nil
+  "Major mode for editing YSH files."
+  :group 'languages
+  :prefix "ysh-")
+
+(defface ysh-expr-face
+  '((t :inherit font-lock-type-face))
+  "Face for YSH expression contexts (mapped from Vim `yshExpr` → Type)."
+  :group 'ysh)
+
+(defface ysh-var-sub-face
+  '((t :inherit font-lock-variable-name-face))
+  "Face for variable substitutions like $name, ${name}."
+  :group 'ysh)
+
+(defface ysh-sigil-pair-face
+  '((t :inherit font-lock-constant-face))
+  "Face for sigil-pair delimiters $() $[] @() @[] ^() ^[]."
+  :group 'ysh)
+
+(defface ysh-func-name-face
+  '((t :inherit font-lock-function-name-face))
+  "Face for function names in `func` declarations."
+  :group 'ysh)
+
+(defface ysh-proc-name-face
+  '((t :inherit font-lock-function-name-face))
+  "Face for proc names in `proc` declarations."
+  :group 'ysh)
+
+(defface ysh-backslash-face
+  '((t :inherit font-lock-constant-face))
+  "Face for backslash-quoted characters (Vim `backslashQuoted` → Character)."
+  :group 'ysh)
+
+(defface ysh-j8-escape-face
+  '((t :inherit font-lock-constant-face))
+  "Face for J8 string escapes: \\n \\yff \\u{3bc} etc."
+  :group 'ysh)
+
+(defface ysh-j8-error-face
+  '((t :inherit font-lock-warning-face))
+  "Face for invalid backslash escapes in J8 strings."
+  :group 'ysh)
+
+;; ---------------------------------------------------------------------
+;; Regex building blocks (from lib-regex.vim)
+;; ---------------------------------------------------------------------
+
+(defconst ysh--var-name-re "[a-zA-Z_][a-zA-Z0-9_]*"
+  "Regex matching a YSH variable / function name.")
+
+(defconst ysh--proc-name-re "[a-zA-Z_-][a-zA-Z0-9_-]*"
+  "Regex matching a YSH proc name (hyphens allowed).")
+
+(defconst ysh--first-word-prefix "\\(?:^\\|[;|&]\\)\\s-*"
+  "Anchors a keyword to the first word position in a command.")
+
+;; ---------------------------------------------------------------------
+;; Font-lock keywords
+;; ---------------------------------------------------------------------
+
+(defconst ysh-font-lock-keywords
+  (let ((first ysh--first-word-prefix))
+    `(
+      ;; ----- Comments (from lib-comment-string.vim) -----
+      ;; # at beginning of line or preceded by whitespace
+      ("^#.*$" . font-lock-comment-face)
+      ("[ \t]\\(#.*\\)$" 1 font-lock-comment-face)
+
+      ;; ----- proc / func declarations -----
+      ;; `proc my-name` — proc name may contain hyphens
+      (,(concat first "\\(proc\\)\\s-+\\(" ysh--proc-name-re "\\)")
+       (1 font-lock-keyword-face)
+       (2 'ysh-proc-name-face))
+      ;; `func myName`
+      (,(concat first "\\(func\\)\\s-+\\(" ysh--var-name-re "\\)")
+       (1 font-lock-keyword-face)
+       (2 'ysh-func-name-face))
+
+      ;; ----- Expression-taking keywords (from lib-command-expr-dq.vim) -----
+      ;; const var setvar setglobal call — anchored to first-word position
+      (,(concat first "\\(const\\|var\\|setvar\\|setglobal\\|call\\)\\>")
+       1 font-lock-keyword-face)
+      ;; Bare `= expr` at start of line
+      (,(concat first "\\(=\\)\\s-") 1 font-lock-keyword-face)
+
+      ;; ----- Shell / YSH keywords (from lib-command-expr-dq.vim) -----
+      (,(concat "\\<"
+                (regexp-opt
+                 '("if" "elif" "else" "case" "while" "for" "in" "time"
+                   "break" "continue" "return")
+                 t)
+                "\\>")
+       . font-lock-keyword-face)
+
+      ;; ----- Expression keywords (contained in expr contexts) -----
+      (,(concat "\\<"
+                (regexp-opt
+                 '("and" "or" "not" "is" "as" "capture")
+                 t)
+                "\\>")
+       . font-lock-keyword-face)
+
+      ;; ----- Builtin procs / commands -----
+      (,(concat first
+                (regexp-opt
+                 '("echo" "write" "read" "cd" "pushd" "popd"
+                   "source" "use" "shopt" "exit"
+                   "assert" "try" "boolstatus"
+                   "json" "pp" "type" "append"
+                   "hay" "haynode"
+                   "fork" "forkwait"
+                   "runproc" "invoke"
+                   "shvar" "ctx"
+                   "test" "exec"
+                   "command" "builtin" "true" "false")
+                 t)
+                "\\>")
+       1 font-lock-builtin-face)
+
+      ;; ----- Expression atoms (from lib-details.vim) -----
+      ;; null true false
+      ("\\<\\(null\\|true\\|false\\)\\>" . font-lock-constant-face)
+      ;; Numeric literals
+      ("\\<[0-9]+\\(?:\\.[0-9]+\\)?\\(?:[eE][-+]?[0-9]+\\)?\\>" . font-lock-constant-face)
+      ;; 0x hex literals
+      ("\\<0[xX][0-9a-fA-F]+\\>" . font-lock-constant-face)
+
+      ;; ----- Backslash-quoted chars (from stage3.vim) -----
+      ;; \# \' \" \$ \@ \( \) \{ \} \\ \[ \]
+      ("\\\\[#'\"$@(){}\\\\\\[\\]]" . 'ysh-backslash-face)
+
+      ;; ----- Sigil pairs: delimiters (from lib-command-expr-dq.vim) -----
+      ;; $( $[ @( @[ ^( ^[  and their closing counterparts
+      ("\\(\\$\\|@\\|\\^\\)\\([([\\[]\\)" (1 'ysh-sigil-pair-face) (2 'ysh-sigil-pair-face))
+      ;; :| array literal opener
+      ("\\(:|\\)" 1 'ysh-sigil-pair-face)
+
+      ;; ----- Variable substitutions (from lib-details.vim) -----
+      ;; $name
+      (,(concat "\\$" ysh--var-name-re) . 'ysh-var-sub-face)
+      ;; ${name ...}
+      (,(concat "\\${" ysh--var-name-re "[^}]*}") . 'ysh-var-sub-face)
+      ;; $0 .. $9
+      ("\\$[0-9]" . 'ysh-var-sub-face)
+      ;; ${12 ...}
+      ("\\${[0-9]+[^}]*}" . 'ysh-var-sub-face)
+      ;; @splice  (at start of line or after whitespace)
+      (,(concat "\\(?:^\\|\\s-\\)\\(@" ysh--var-name-re "\\)") 1 'ysh-var-sub-face)
+
+      ;; ----- Special variables -----
+      ("\\<\\(ARGV\\|ARGS\\|ENV\\|_reply\\|_status\\|_error\\)\\>" . font-lock-variable-name-face)
+
+      ;; ----- Pipe / logical operators -----
+      ("\\(|\\|&&\\|||\\)" 1 font-lock-preprocessor-face)
+
+      ;; ----- `is-main` pattern -----
+      ("\\<is-main\\>" . font-lock-builtin-face)
+
+      ;; ----- Shebang line -----
+      ("\\`#!.*$" . font-lock-comment-face)
+      ))
+  "Font-lock keywords for `ysh-mode`.")
+
+;; ---------------------------------------------------------------------
+;; Syntax table — strings and comments
+;; ---------------------------------------------------------------------
+
+(defvar ysh-mode-syntax-table
+  (let ((st (make-syntax-table)))
+    ;; # starts a comment to end of line
+    (modify-syntax-entry ?# "<" st)
+    (modify-syntax-entry ?\n ">" st)
+
+    ;; Double-quoted strings
+    (modify-syntax-entry ?\" "\"" st)
+
+    ;; Single quote — treated as punctuation; string parsing is handled
+    ;; by syntax-propertize-function to avoid triple-quote confusion.
+    (modify-syntax-entry ?' "." st)
+
+    ;; Parens, brackets, braces
+    (modify-syntax-entry ?\( "()" st)
+    (modify-syntax-entry ?\) ")(" st)
+    (modify-syntax-entry ?\[ "(]" st)
+    (modify-syntax-entry ?\] ")[" st)
+    (modify-syntax-entry ?{ "(}" st)
+    (modify-syntax-entry ?} "){" st)
+
+    ;; $ and @ are part of symbol names in variable substitutions
+    (modify-syntax-entry ?$ "'" st)
+    (modify-syntax-entry ?@ "'" st)
+
+    ;; Backslash is escape
+    (modify-syntax-entry ?\\ "\\" st)
+
+    ;; Underscore and hyphen in identifiers
+    (modify-syntax-entry ?_ "w" st)
+    (modify-syntax-entry ?- "_" st)
+
+    st)
+  "Syntax table for `ysh-mode`.")
+
+;; ---------------------------------------------------------------------
+;; Syntactic font-lock for multi-line strings
+;; ---------------------------------------------------------------------
+
+(defun ysh--syntax-propertize (start end)
+  "Apply syntax properties for YSH string forms between START and END.
+Handles:
+ - Triple-quoted single strings: \\='''...\\='''  (with optional r/b/u prefix)
+ - Triple-quoted double strings: \\=\"\\=\"\\=\"...\\=\"\\=\"\\=\"  (with optional $ prefix)
+ - Regular single-quoted strings: \\='...\\='  (with optional r/b/u prefix)
+ - Dollar double-quoted strings: $\\=\"...\\=\""
+  (goto-char start)
+  ;; Triple-single-quoted: [rbu]?''' ... '''
+  ;; Must come before regular single-quoted to win the match.
+  (while (re-search-forward "\\(?:[rbu]\\)?\\('''\\)" end t)
+    (let ((open-start (match-beginning 1)))
+      (unless (nth 8 (save-excursion (syntax-ppss open-start)))
+        ;; Mark first quote as generic string opener
+        (put-text-property open-start (1+ open-start)
+                           'syntax-table (string-to-syntax "|"))
+        ;; Mark the middle two quotes as punctuation (inert)
+        (put-text-property (1+ open-start) (+ open-start 2)
+                           'syntax-table (string-to-syntax "."))
+        (put-text-property (+ open-start 2) (+ open-start 3)
+                           'syntax-table (string-to-syntax "."))
+        ;; Find closing '''
+        (when (re-search-forward "'''" end t)
+          (let ((close-end (point)))
+            ;; Mark first two closing quotes as punctuation
+            (put-text-property (- close-end 3) (- close-end 2)
+                               'syntax-table (string-to-syntax "."))
+            (put-text-property (- close-end 2) (- close-end 1)
+                               'syntax-table (string-to-syntax "."))
+            ;; Mark last quote as generic string closer
+            (put-text-property (- close-end 1) close-end
+                               'syntax-table (string-to-syntax "|")))))))
+
+  (goto-char start)
+  ;; Triple-double-quoted: $?""" ... """
+  (while (re-search-forward "\\(?:\\$\\)?\\(\"\"\"\\)" end t)
+    (let ((open-start (match-beginning 1)))
+      (unless (nth 8 (save-excursion (syntax-ppss open-start)))
+        (put-text-property open-start (1+ open-start)
+                           'syntax-table (string-to-syntax "|"))
+        (put-text-property (1+ open-start) (+ open-start 2)
+                           'syntax-table (string-to-syntax "."))
+        (put-text-property (+ open-start 2) (+ open-start 3)
+                           'syntax-table (string-to-syntax "."))
+        (when (re-search-forward "\"\"\"" end t)
+          (let ((close-end (point)))
+            (put-text-property (- close-end 3) (- close-end 2)
+                               'syntax-table (string-to-syntax "."))
+            (put-text-property (- close-end 2) (- close-end 1)
+                               'syntax-table (string-to-syntax "."))
+            (put-text-property (- close-end 1) close-end
+                               'syntax-table (string-to-syntax "|")))))))
+
+  (goto-char start)
+  ;; Regular single-quoted: [rbu]?'...' (single line, non-triple)
+  ;; Negative lookahead for triple: match ' not followed by ''
+  (while (re-search-forward "\\(?:\\<[rbu]\\)?\\('\\)\\(?:''\\)\\@![^'\n]*\\('\\)" end t)
+    (unless (nth 8 (save-excursion (syntax-ppss (match-beginning 1))))
+      (put-text-property (match-beginning 1) (match-end 1)
+                         'syntax-table (string-to-syntax "\""))
+      (put-text-property (match-beginning 2) (match-end 2)
+                         'syntax-table (string-to-syntax "\""))))
+
+  (goto-char start)
+  ;; Dollar double-quoted: $"..."
+  (while (re-search-forward "\\$\\(\"\\)\\(?:[^\"\\]\\|\\\\.\\)*\\(\"\\)" end t)
+    (unless (nth 8 (save-excursion (syntax-ppss (match-beginning 0))))
+      (put-text-property (match-beginning 1) (match-end 1)
+                         'syntax-table (string-to-syntax "\""))
+      (put-text-property (match-beginning 2) (match-end 2)
+                         'syntax-table (string-to-syntax "\"")))))
+
+;; ---------------------------------------------------------------------
+;; Indentation (simple heuristic)
+;; ---------------------------------------------------------------------
+
+(defcustom ysh-indent-offset 2
+  "Number of spaces for each indentation level in `ysh-mode`."
+  :type 'integer
+  :group 'ysh)
+
+(defun ysh-indent-line ()
+  "Indent the current line in `ysh-mode`."
+  (interactive)
+  (let ((indent (ysh--calculate-indent)))
+    (when indent
+      (save-excursion
+        (beginning-of-line)
+        (delete-horizontal-space)
+        (indent-to indent))
+      (when (< (current-column) indent)
+        (back-to-indentation)))))
+
+(defun ysh--calculate-indent ()
+  "Calculate indentation for the current YSH line."
+  (save-excursion
+    (beginning-of-line)
+    (cond
+     ;; First line
+     ((bobp) 0)
+     ;; Closing brace/bracket/paren — match opener
+     ((looking-at "^\\s-*[})]")
+      (ysh--indent-of-matching-open))
+     ;; Default: base on previous non-blank line
+     (t
+      (let ((prev-indent 0)
+            (prev-opens nil))
+        (save-excursion
+          (forward-line -1)
+          (while (and (not (bobp)) (looking-at "^\\s-*$"))
+            (forward-line -1))
+          (setq prev-indent (current-indentation))
+          (end-of-line)
+          ;; Check if previous line opens a block
+          (setq prev-opens
+                (save-excursion
+                  (beginning-of-line)
+                  (looking-at ".*[{(]\\s-*\\(?:#.*\\)?$"))))
+        (if prev-opens
+            (+ prev-indent ysh-indent-offset)
+          prev-indent))))))
+
+(defun ysh--indent-of-matching-open ()
+  "Return indentation of the line containing the matching open brace/paren."
+  (save-excursion
+    (beginning-of-line)
+    (skip-chars-forward " \t")
+    (condition-case nil
+        (progn
+          (forward-char 1)    ; move past the closing delimiter
+          (backward-sexp 1)   ; jump to matching opener
+          (current-indentation))
+      (scan-error 0))))
+
+;; ---------------------------------------------------------------------
+;; String font-lock (multi-line aware)
+;; ---------------------------------------------------------------------
+
+(defconst ysh-font-lock-strings
+  `(
+    ;; ----- Triple-quoted strings (must come before single-line) -----
+    ;; r''' ... '''
+    ("\\<r\\('''\\(?:.\\|\n\\)*?'''\\)" 1 font-lock-string-face t)
+    ;; b''' u''' ... '''
+    ("\\<[bu]\\('''\\(?:.\\|\n\\)*?'''\\)" 1 font-lock-string-face t)
+    ;; plain ''' ... '''
+    ("[^a-zA-Z0-9_']\\('''\\(?:.\\|\n\\)*?'''\\)" 1 font-lock-string-face t)
+    ;; $""" ... """
+    ("\\$\\(\"\"\"\\(?:.\\|\n\\)*?\"\"\"\\)" 1 font-lock-string-face t)
+    ;; plain """ ... """
+    ("[^a-zA-Z0-9_\"]\\(\"\"\"\\(?:.\\|\n\\)*?\"\"\"\\)" 1 font-lock-string-face t)
+
+    ;; ----- J8 / prefix single-line strings -----
+    ;; b'...' u'...'
+    ("\\<[bu]\\('[^'\n]*'\\)" 1 font-lock-string-face t)
+    ;; r'...'
+    ("\\<r\\('[^'\n]*'\\)" 1 font-lock-string-face t)
+    ;; $"..."
+    ("\\$\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)" 1 font-lock-string-face t)
+
+    ;; ----- J8 escape sequences inside b'' u'' strings -----
+    ;; Valid JSON escapes: \\ \" \/ \b \f \n \r \t
+    ("\\<[bu]'[^']*\\(\\\\[\\\\\"'/bfnrt]\\)[^']*'" 1 'ysh-j8-escape-face t)
+    ;; \' in J8 strings
+    ("\\<[bu]'[^']*\\(\\\\[']\\)[^']*'" 1 'ysh-j8-escape-face t)
+    ;; \yHH hex bytes
+    ("\\<[bu]'[^']*\\(\\\\y[0-9a-fA-F]\\{2\\}\\)[^']*'" 1 'ysh-j8-escape-face t)
+    ;; \u{HHHHHH} or \U{HHHHHH}
+    ("\\<[bu]'[^']*\\(\\\\[uU]{[0-9a-fA-F]\\{1,6\\}}\\)[^']*'" 1 'ysh-j8-escape-face t)
+    )
+  "Font-lock rules for YSH string literals.")
+
+;; ---------------------------------------------------------------------
+;; Mode definition
+;; ---------------------------------------------------------------------
+
+(defconst ysh-font-lock-all
+  (append ysh-font-lock-keywords ysh-font-lock-strings)
+  "Combined font-lock keywords for `ysh-mode`.")
+
+;;;###autoload
+(define-derived-mode ysh-mode prog-mode "YSH"
+  "Major mode for editing YSH (Oils shell) files.
+
+Provides syntax highlighting based on the oils.vim Vim plugin,
+covering keywords, builtins, all 5 string types (+ triple-quoted),
+variable substitutions, sigil pairs, expression atoms, proc/func
+definitions, J8 string escapes, and backslash escaping.
+
+\\{ysh-mode-map}"
+  :group 'ysh
+  :syntax-table ysh-mode-syntax-table
+
+  ;; Comments
+  (setq-local comment-start "# ")
+  (setq-local comment-end "")
+  (setq-local comment-start-skip "#+ *")
+
+  ;; Syntax propertize for multi-line / prefixed strings
+  (setq-local syntax-propertize-function #'ysh--syntax-propertize)
+
+  ;; Font-lock
+  (setq-local font-lock-defaults
+              '(ysh-font-lock-all
+                nil   ; keywords-only — nil means also use syntax table
+                nil   ; case-fold
+                nil   ; syntax-alist
+                ))
+  ;; Support multi-line constructs
+  (setq-local font-lock-multiline t)
+
+  ;; Indentation
+  (setq-local indent-line-function #'ysh-indent-line)
+  (setq-local indent-tabs-mode nil)
+  (setq-local tab-width ysh-indent-offset)
+
+  ;; Misc
+  (setq-local parse-sexp-ignore-comments t)
+  (setq-local beginning-of-defun-function #'ysh-beginning-of-defun)
+  (setq-local end-of-defun-function #'ysh-end-of-defun))
+
+;; ---------------------------------------------------------------------
+;; Navigation
+;; ---------------------------------------------------------------------
+
+(defun ysh-beginning-of-defun (&optional arg)
+  "Move to the beginning of the current proc/func definition.
+With ARG, move back ARG definitions."
+  (interactive "^p")
+  (setq arg (or arg 1))
+  (re-search-backward
+   (concat "^\\s-*\\(?:proc\\|func\\)\\s-+" ysh--proc-name-re)
+   nil t arg))
+
+(defun ysh-end-of-defun (&optional arg)
+  "Move to the end of the current proc/func definition.
+With ARG, move forward ARG definitions."
+  (interactive "^p")
+  (setq arg (or arg 1))
+  (when (looking-at (concat "^\\s-*\\(?:proc\\|func\\)\\s-+" ysh--proc-name-re))
+    (forward-line 1))
+  (re-search-forward "^}" nil t arg))
+
+;; ---------------------------------------------------------------------
+;; Auto-mode and interpreter support
+;; ---------------------------------------------------------------------
+
+;;;###autoload
+(add-to-list 'auto-mode-alist '("\\.ysh\\'" . ysh-mode))
+
+;;;###autoload
+(add-to-list 'interpreter-mode-alist '("ysh" . ysh-mode))
+
+(provide 'ysh-mode)
+;;; ysh-mode.el ends here
