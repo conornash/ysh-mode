@@ -234,13 +234,26 @@
 ;; Syntactic font-lock for multi-line strings
 ;; ---------------------------------------------------------------------
 
+(defun ysh--syntax-propertize-extend-region (start end)
+  "Extend the syntax-propertize region backward if START is inside a string.
+This ensures triple-quoted string openers are included in the region."
+  (save-excursion
+    (let ((state (syntax-ppss start)))
+      (when (nth 3 state)  ; inside a string
+        (let ((string-start (nth 8 state)))  ; position of string opener
+          (when (and string-start (< string-start start))
+            (cons string-start end)))))))
+
 (defun ysh--syntax-propertize (start end)
   "Apply syntax properties for YSH string forms between START and END.
 Handles:
  - Triple-quoted single strings: \\='''...\\='''  (with optional r/b/u prefix)
  - Triple-quoted double strings: \\=\"\\=\"\\=\"...\\=\"\\=\"\\=\"  (with optional $ prefix)
  - Regular single-quoted strings: \\='...\\='  (with optional r/b/u prefix)
- - Dollar double-quoted strings: $\\=\"...\\=\""
+ - Dollar double-quoted strings: $\\=\"...\\=\"
+
+Closing delimiters for triple-quoted strings are searched up to `point-max'
+so that JIT-lock sub-region boundaries do not prevent finding the closer."
   (goto-char start)
   ;; Triple-single-quoted: [rbu]?''' ... '''
   ;; Must come before regular single-quoted to win the match.
@@ -255,8 +268,9 @@ Handles:
                            'syntax-table (string-to-syntax "."))
         (put-text-property (+ open-start 2) (+ open-start 3)
                            'syntax-table (string-to-syntax "."))
-        ;; Find closing '''
-        (when (re-search-forward "'''" end t)
+        ;; Find closing ''' — search to end of buffer, not just END,
+        ;; because the closer may be far beyond the propertize region.
+        (when (re-search-forward "'''" (point-max) t)
           (let ((close-end (point)))
             ;; Mark first two closing quotes as punctuation
             (put-text-property (- close-end 3) (- close-end 2)
@@ -278,7 +292,8 @@ Handles:
                            'syntax-table (string-to-syntax "."))
         (put-text-property (+ open-start 2) (+ open-start 3)
                            'syntax-table (string-to-syntax "."))
-        (when (re-search-forward "\"\"\"" end t)
+        ;; Search to end of buffer for closing """
+        (when (re-search-forward "\"\"\"" (point-max) t)
           (let ((close-end (point)))
             (put-text-property (- close-end 3) (- close-end 2)
                                'syntax-table (string-to-syntax "."))
@@ -434,6 +449,8 @@ definitions, J8 string escapes, and backslash escaping.
 
   ;; Syntax propertize for multi-line / prefixed strings
   (setq-local syntax-propertize-function #'ysh--syntax-propertize)
+  (add-hook 'syntax-propertize-extend-region-functions
+            #'ysh--syntax-propertize-extend-region nil t)
 
   ;; Font-lock
   (setq-local font-lock-defaults
