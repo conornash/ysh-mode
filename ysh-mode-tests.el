@@ -687,5 +687,701 @@ missing from ysh--expr-keyword-re. Ternary expressions need them."
     ;; 'else' should be keyword
     (should (ysh-test--has-face text 14 'font-lock-keyword-face))))
 
+;; =====================================================================
+;; Bug: closing | of :| ... | gets pipe face instead of sigil-pair face
+;; =====================================================================
+
+(ert-deftest ysh-stage2/array-literal-close ()
+  "var x = :| one two | — closing | should be sigil-pair, not pipe.
+Bug: the pipe operator rule matches the closing | of :| ... |."
+  (let ((text "var x = :| one two |"))
+    ;; Opening :| is sigil-pair (existing test covers this)
+    (should (ysh-test--has-face text 9 'ysh-sigil-pair-face))
+    ;; Closing | should ALSO be sigil-pair, NOT preprocessor (pipe)
+    (should (ysh-test--has-face text 20 'ysh-sigil-pair-face))
+    (should-not (ysh-test--has-face text 20 'font-lock-preprocessor-face))))
+
+;; =====================================================================
+;; Bug: $() inside "..." — command sub contents get string-face
+;; =====================================================================
+
+(ert-deftest ysh-stage2/command-sub-in-dq ()
+  "echo \"hi $(echo inner) bye\" — $() inside DQ is a command sub.
+Bug: ysh--scan-dq-content only handles $[, not $(. The content of
+$() inside a DQ string incorrectly gets font-lock-string-face."
+  (let ((text "echo \"hi $(echo inner) bye\""))
+    ;; 'hi' is string
+    (should (ysh-test--has-face text 7 'font-lock-string-face))
+    ;; 'bye' after $() is string (outer string resumes)
+    (should (ysh-test--has-face text 24 'font-lock-string-face))
+    ;; 'echo' INSIDE $() should NOT be string — it's a command
+    (should-not (ysh-test--has-face text 12 'font-lock-string-face))))
+
+;; =====================================================================
+;; Bug: 'in' not highlighted in 'for x in a b'
+;; =====================================================================
+
+(ert-deftest ysh-stage2/for-in-keyword ()
+  "for x in a b { } — 'in' is a keyword in for loops.
+Bug: shell keywords are anchored to first-word position, but 'in'
+appears mid-line in for loops. It should be highlighted there."
+  (let ((text "for x in a b { echo hi }"))
+    ;; 'for' is keyword
+    (should (ysh-test--has-face text 1 'font-lock-keyword-face))
+    ;; 'in' should also be keyword
+    (should (ysh-test--has-face text 7 'font-lock-keyword-face))))
+
+(ert-deftest ysh-stage2/echo-in-not-keyword ()
+  "echo in — 'in' is NOT a keyword when it's an argument.
+Companion test: 'in' should only be keyword in for loops, not everywhere."
+  (should-not (ysh-test--has-face "echo in" 6 'font-lock-keyword-face)))
+
+;; =====================================================================
+;; Stage 2: 'in' keyword context (from minimal.ysh, recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/for-i-item-in ()
+  "for i, item in (a) — 'in' highlighted after destructuring.
+From testdata/recursive-modes.ysh."
+  (let ((text "for i, item in (a) {"))
+    (should (ysh-test--has-face text 1 'font-lock-keyword-face))   ; for
+    (should (ysh-test--has-face text 13 'font-lock-keyword-face)))) ; in
+
+;; =====================================================================
+;; Stage 2: $() command sub inside DQ strings (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/command-sub-in-dq-greeting ()
+  "echo \"greeting = $(echo hi)\" — from recursive-modes.ysh.
+$() inside DQ: content should not be string-faced."
+  (let ((text "echo \"greeting = $(echo hi)\""))
+    ;; 'greeting' is string
+    (should (ysh-test--has-face text 7 'font-lock-string-face))
+    ;; 'echo' inside $() should NOT be string
+    (should-not (ysh-test--has-face text 20 'font-lock-string-face))))
+
+(ert-deftest ysh-stage2/dq-after-command-sub-resumes ()
+  "echo \"hi $(echo x) bye\" — text after $() resumes as string.
+The ' bye' after the closing ) should be string-faced."
+  (let ((text "echo \"hi $(echo x) bye\""))
+    ;; 'bye' after $() is string
+    (should (ysh-test--has-face text 21 'font-lock-string-face))))
+
+(ert-deftest ysh-stage2/expr-sub-in-dq ()
+  "echo \"sum = $[x + 99]\" — from recursive-modes.ysh.
+$[] inside DQ: content should be string (per current coarse algorithm),
+but the outer string should terminate correctly."
+  (let ((text "echo \"sum = $[x + 99]\""))
+    ;; opening " is string
+    (should (ysh-test--has-face text 6 'font-lock-string-face))
+    ;; closing " is string
+    (should (ysh-test--has-face text 22 'font-lock-string-face))))
+
+;; =====================================================================
+;; Stage 2: :| ... | closing delimiter (from minimal.ysh, details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/array-literal-multiline-close ()
+  "Multi-line :| ... | — closing | should be sigil-pair.
+From testdata/recursive-modes.ysh."
+  (let ((text "var foods = :| \n  pea nut \n|"))
+    ;; closing | on last line
+    (should (ysh-test--has-face text (length text) 'ysh-sigil-pair-face))))
+
+(ert-deftest ysh-stage2/array-literal-with-hash ()
+  ":| with # comment inside — from recursive-modes.ysh.
+The # inside :| ... | should be a comment."
+  (let ((text "var foods = :| \n  pea nut \n  # comment\n  other\n|"))
+    ;; # should be comment
+    (should (ysh-test--is-comment text 33))))
+
+;; =====================================================================
+;; Stage 2: time keyword (from recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/time-keyword ()
+  "time echo hi | wc -l — 'time' is a keyword.
+From testdata/recursive-modes.ysh."
+  (should (ysh-test--has-face "time echo hi | wc -l" 1 'font-lock-keyword-face)))
+
+;; =====================================================================
+;; Stage 2: hay define (from recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/hay-define ()
+  "hay define Package — 'hay' could be a builtin/keyword.
+From testdata/recursive-modes.ysh."
+  ;; At minimum, 'hay' should not be highlighted as a shell keyword
+  ;; (it's a builtin command). If we support it, it gets builtin face.
+  (let ((text "hay define Package"))
+    (should-not (ysh-test--has-face text 1 'font-lock-keyword-face))))
+
+;; =====================================================================
+;; Stage 2: false-positive — keyword-like words as proc arguments
+;; (from false-positive.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/proc-arg-var-not-keyword ()
+  "p var x = (42) — 'var' is a proc argument, not a keyword.
+From testdata/false-positive.ysh."
+  (let ((text "p var x = (42)"))
+    ;; 'var' at pos 3 should NOT be keyword (it's an argument to 'p')
+    (should-not (ysh-test--has-face text 3 'font-lock-keyword-face))))
+
+(ert-deftest ysh-stage2/proc-arg-setvar-not-keyword ()
+  "p setvar x = (42) — 'setvar' is a proc argument, not a keyword.
+From testdata/false-positive.ysh."
+  (let ((text "p setvar x = (42)"))
+    ;; 'setvar' at pos 3 should NOT be keyword
+    (should-not (ysh-test--has-face text 3 'font-lock-keyword-face))))
+
+(ert-deftest ysh-stage2/keyword-after-pipe-proc ()
+  "echo | proc p { } — 'proc' after | is a keyword.
+From testdata/false-positive.ysh."
+  (let ((text "echo pipeline | proc p { echo pipeline }"))
+    ;; 'proc' starts at pos 17
+    (should (ysh-test--has-face text 17 'font-lock-keyword-face))))
+
+;; =====================================================================
+;; Stage 2: false-negative — semicolon-comment (from false-negative.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage1/comment-after-semicolon-no-space ()
+  "echo yes;#comment — # after ; with no space should be a comment.
+From testdata/false-negative.ysh."
+  (let ((text "echo yes;#comment"))
+    (should (ysh-test--is-comment text 10))))
+
+;; =====================================================================
+;; Stage 2: multi-line ... continuation (from minimal.ysh, details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/dot-continuation ()
+  "... echo multi- line ; — '...' starts a continuation.
+From testdata/minimal.ysh. The ... should be highlighted."
+  (let ((text "... echo\n    multi-\n    line ;"))
+    ;; '...' at pos 1 should have some face (keyword or preprocessor)
+    (should (ysh-test--face-at text 1))))
+
+;; =====================================================================
+;; Stage 2: backslash continuation (from minimal.ysh, details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/backslash-continuation ()
+  "echo \\ \\n  multi- \\ — trailing backslash is line continuation.
+From testdata/minimal.ysh."
+  (let ((text "echo \\\n  multi- \\\n  line"))
+    ;; The trailing \ should be highlighted (backslash-face)
+    (should (ysh-test--has-face text 6 'ysh-backslash-face))))
+
+;; =====================================================================
+;; Stage 3: eggex literals (from details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/eggex-literal ()
+  "= /d+ '.' [a-z]+/ — eggex between / / should be highlighted.
+From testdata/details.ysh."
+  (let ((text "= /d+ '.' [a-z A-Z 0-9 '-']+/"))
+    ;; The / delimiters or content should have some face
+    ;; (At minimum the eggex should not be confused with a comment)
+    (should-not (ysh-test--is-comment text 5))))
+
+(ert-deftest ysh-stage3/eggex-capture ()
+  "= /<capture d d as month>/ — capture keyword in eggex.
+From testdata/details.ysh."
+  (let ((text "= /<capture d d as month> '-' <capture d d as day>/"))
+    ;; 'capture' should be highlighted (keyword face)
+    (should (ysh-test--has-face text 5 'font-lock-keyword-face))))
+
+;; =====================================================================
+;; Stage 3: float and scientific literals (from details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/float-literal ()
+  "= 3.14 — float literal should be constant-face.
+From testdata/details.ysh."
+  (should (ysh-test--has-face "= 3.14" 3 'font-lock-constant-face)))
+
+(ert-deftest ysh-stage3/scientific-notation ()
+  "= 3.14e-5 — scientific notation should be constant-face.
+From testdata/details.ysh."
+  (should (ysh-test--has-face "= 3.14e-5" 3 'font-lock-constant-face)))
+
+;; =====================================================================
+;; Stage 3: redirects (from details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/redirect-stdout ()
+  "echo stdout > /dev/null — '>' should have some face.
+From testdata/details.ysh."
+  (let ((text "echo stdout > /dev/null"))
+    (should (ysh-test--face-at text 13))))
+
+(ert-deftest ysh-stage3/redirect-stderr ()
+  "echo stderr 2> /dev/null — '2>' should have some face.
+From testdata/details.ysh."
+  (let ((text "echo stderr 2> /dev/null"))
+    (should (ysh-test--face-at text 13))))
+
+(ert-deftest ysh-stage3/redirect-brace ()
+  "redir {out}> /tmp/out.txt — brace redirect.
+From testdata/details.ysh."
+  (let ((text "redir {out}> /tmp/out.txt {"))
+    ;; {out} or > should have some face
+    (should (ysh-test--face-at text 7))))
+
+;; =====================================================================
+;; Stage 3: tilde expansion (from details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/tilde-home ()
+  "echo ~/src — ~ should be highlighted.
+From testdata/details.ysh."
+  (let ((text "echo ~/src"))
+    (should (ysh-test--face-at text 6))))
+
+(ert-deftest ysh-stage3/tilde-user ()
+  "echo ~root/src — ~root should be highlighted.
+From testdata/details.ysh."
+  (let ((text "echo ~root/src"))
+    (should (ysh-test--face-at text 6))))
+
+;; =====================================================================
+;; Stage 3: glob patterns (from details.ysh, recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/glob-star ()
+  "echo *.py — glob * should be highlighted.
+From testdata/details.ysh."
+  (let ((text "echo *.py"))
+    (should (ysh-test--face-at text 6))))
+
+(ert-deftest ysh-stage3/brace-expansion ()
+  "echo {a,b}@example.com — brace expansion.
+From testdata/details.ysh."
+  (let ((text "echo {a,b}@example.com"))
+    (should (ysh-test--face-at text 6))))
+
+(ert-deftest ysh-stage3/range-expansion ()
+  "echo {0..4}-{a,b} — range brace expansion.
+From testdata/details.ysh."
+  (let ((text "echo {0..4}-{a,b}"))
+    (should (ysh-test--face-at text 6))))
+
+;; =====================================================================
+;; Stage 3: env prefix (from details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/env-prefix ()
+  "FOO=bar env -i echo — FOO=bar should be highlighted.
+From testdata/details.ysh."
+  (let ((text "FOO=bar env -i echo"))
+    (should (ysh-test--face-at text 1))))
+
+(ert-deftest ysh-stage3/env-prefix-multi ()
+  "FOO=bar SPAM_EGGS='baz' env — multiple env prefixes.
+From testdata/details.ysh."
+  (let ((text "FOO=bar SPAM_EGGS='baz' env -i echo"))
+    (should (ysh-test--face-at text 1))
+    (should (ysh-test--face-at text 9))))
+
+;; =====================================================================
+;; Stage 2: here-docs (stretch goal — from minimal.ysh comments)
+;; =====================================================================
+
+;; (Here-docs are noted in the testdata but no concrete examples exist.
+;;  These tests are placeholders for if/when we add here-doc support.)
+
+;; =====================================================================
+;; Stage 2: proc/func with complex signatures
+;; (from recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/func-with-default-raw-string ()
+  "func myFunc(x; delimiter=r'\\\\', other=\"hi $x\") — complex signature.
+From testdata/recursive-modes.ysh. The r'\\\\' default should be string."
+  (let ((text "func myFunc(x; delimiter=r'\\', other=\"hi $x\") { return (x) }"))
+    ;; func is keyword
+    (should (ysh-test--has-face text 1 'font-lock-keyword-face))
+    ;; myFunc is func-name (not proc-name)
+    (should (ysh-test--has-face text 6 'ysh-func-name-face))
+    ;; r'\' is a string (pos 28 is the \ inside r'')
+    (should (ysh-test--has-face text 28 'font-lock-string-face))))
+
+(ert-deftest ysh-stage2/proc-with-command-sub-default ()
+  "proc my-proc(x, y; d=$(echo hi)) — $() in default value.
+From testdata/recursive-modes.ysh."
+  (let ((text "proc my-proc(x, y; d=$(echo hi)) { echo hi }"))
+    (should (ysh-test--has-face text 1 'font-lock-keyword-face))
+    (should (ysh-test--has-face text 6 'ysh-proc-name-face))))
+
+;; =====================================================================
+;; Stage 2: pp command (from recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/pp-as-builtin ()
+  "pp (42) — 'pp' should be a builtin.
+From testdata/recursive-modes.ysh."
+  (let ((text "pp (42)"))
+    (should (ysh-test--has-face text 1 'font-lock-builtin-face))))
+
+(ert-deftest ysh-stage2/pp-bracket ()
+  "pp [42] — 'pp' with bracket arg.
+From testdata/recursive-modes.ysh."
+  (let ((text "pp [42]"))
+    (should (ysh-test--has-face text 1 'font-lock-builtin-face))))
+
+;; =====================================================================
+;; Stage 2: various sigil pairs in expression mode
+;; (from recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/caret-dq-string ()
+  "= ^\"unevaluated $x\" — ^\" sigil pair.
+From testdata/recursive-modes.ysh."
+  (let ((text "= ^\"unevaluated $x\""))
+    ;; ^ should be sigil-pair
+    (should (ysh-test--has-face text 3 'ysh-sigil-pair-face))))
+
+(ert-deftest ysh-stage2/dollar-bracket-in-word ()
+  "echo --flag=$[x + 1] — $[] inside a word.
+From testdata/recursive-modes.ysh."
+  (let ((text "echo --flag=$[x + 1]"))
+    ;; $ should be sigil-pair
+    (should (ysh-test--has-face text 13 'ysh-sigil-pair-face))))
+
+(ert-deftest ysh-stage2/at-bracket ()
+  "echo @[glob('*.py')] — @[] sigil pair.
+From testdata/recursive-modes.ysh."
+  (let ((text "echo @[glob('*.py')]"))
+    ;; @ should be sigil-pair
+    (should (ysh-test--has-face text 6 'ysh-sigil-pair-face))))
+
+;; =====================================================================
+;; Stage 2: escaped sigil pairs (from recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/escaped-dollar-bracket ()
+  "echo \\$[x + 1] — \\$ should prevent sigil-pair.
+From testdata/recursive-modes.ysh."
+  (let ((text "echo \\$[x + 1]"))
+    ;; \$ should be backslash-face, NOT sigil-pair
+    (should (ysh-test--has-face text 6 'ysh-backslash-face))
+    (should-not (ysh-test--has-face text 6 'ysh-sigil-pair-face))))
+
+(ert-deftest ysh-stage2/escaped-at-bracket ()
+  "echo \\@[glob] — \\@ should prevent sigil-pair.
+From testdata/recursive-modes.ysh."
+  (let ((text "echo \\@[glob]"))
+    ;; \@ should be backslash-face
+    (should (ysh-test--has-face text 6 'ysh-backslash-face))))
+
+;; =====================================================================
+;; Stage 3: backslash-escaped brackets/parens/braces
+;; (from recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/backslash-open-brace ()
+  "echo \\{ \\} — backslash braces.
+From testdata/details.ysh."
+  (let ((text "echo \\{ \\}"))
+    (should (ysh-test--has-face text 6 'ysh-backslash-face))
+    (should (ysh-test--has-face text 9 'ysh-backslash-face))))
+
+;; =====================================================================
+;; Stage 3: @splice in :| ... | (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/splice-in-array-literal ()
+  "setvar myarray = :| a b c @my_array | — @splice inside :| |.
+From testdata/minimal.ysh."
+  (let ((text "setvar myarray = :| a b c @my_array |"))
+    ;; @my_array should be splice-face
+    (should (ysh-test--has-face text 27 'ysh-splice-face))))
+
+;; =====================================================================
+;; Stage 3: $0, ${11}, bad $00 $1a (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/var-sub-0 ()
+  "echo $0 — positional $0 in DQ.
+From testdata/minimal.ysh."
+  (should (ysh-test--has-face "echo $0 ${11}" 6 'ysh-var-sub-face)))
+
+(ert-deftest ysh-stage3/var-sub-bad-00 ()
+  "echo bad $00 — $00 should NOT be a valid var sub (only $0).
+From testdata/minimal.ysh."
+  ;; $0 part matches, but the trailing 0 should not be part of it
+  (let ((text "echo bad $00 $1a"))
+    ;; Position 10 ($) is var-sub, but position 12 (second 0) should NOT be
+    (should-not (ysh-test--has-face text 12 'ysh-var-sub-face))))
+
+;; =====================================================================
+;; Stage 3: non-recursive ${} with operators (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/braced-var-default ()
+  "echo ${file:-} — braced var with :- operator.
+From testdata/minimal.ysh."
+  (should (ysh-test--has-face "echo ${file:-}" 6 'ysh-var-sub-face)))
+
+(ert-deftest ysh-stage3/braced-var-default-in-dq ()
+  "echo \"foo ${base_dir:-}\" — braced var with :- in DQ.
+From testdata/minimal.ysh."
+  (let ((text "echo \"foo ${base_dir:-}\""))
+    (should (ysh-test--has-face text 11 'ysh-var-sub-face))))
+
+(ert-deftest ysh-stage3/braced-number-default ()
+  "echo ${12:-} — braced number var with :- operator.
+From testdata/minimal.ysh."
+  (should (ysh-test--has-face "echo ${12:-}" 6 'ysh-var-sub-face)))
+
+;; =====================================================================
+;; Stage 2: setvar with complex lvalues (from recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/setvar-array-element ()
+  "setvar a[0 + 0] = 42 — setvar with subscript lvalue.
+From testdata/recursive-modes.ysh."
+  (should (ysh-test--has-face "setvar a[0 + 0] = 42" 1 'font-lock-keyword-face)))
+
+;; =====================================================================
+;; Stage 2: multi-line expressions with semicolons
+;; (from recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/multi-line-call ()
+  "call g(3, 4, 5); echo hi — semicolon after call ends expression.
+From testdata/recursive-modes.ysh."
+  (let ((text "call g(3, 4, 5); echo hi"))
+    ;; 'call' is keyword
+    (should (ysh-test--has-face text 1 'font-lock-keyword-face))
+    ;; 'echo' after ; should be builtin (not still in expression mode)
+    (should (ysh-test--has-face text 18 'font-lock-builtin-face))))
+
+;; =====================================================================
+;; Stage 2: SQ string types at beginning of line
+;; (from minimal.ysh — 'echo' / r'echo' / $"echo" at BOL)
+;; =====================================================================
+
+(ert-deftest ysh-stage1/sq-string-at-bol ()
+  "'echo' at beginning of line — should be a string, not a command.
+From testdata/minimal.ysh."
+  (should (ysh-test--has-face "'echo'" 1 'font-lock-string-face)))
+
+(ert-deftest ysh-stage1/raw-string-at-bol ()
+  "r'echo' at beginning of line — raw string.
+From testdata/minimal.ysh."
+  (should (ysh-test--has-face "r'echo'" 2 'font-lock-string-face)))
+
+(ert-deftest ysh-stage1/dollar-dq-at-bol ()
+  "$\"echo\" at beginning of line — dollar DQ string.
+From testdata/minimal.ysh."
+  (should (ysh-test--has-face "$\"echo\"" 2 'font-lock-string-face)))
+
+;; =====================================================================
+;; Stage 3: @splice at beginning of line (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/splice-at-bol ()
+  "@my_array — splice at beginning of line should be splice-face.
+From testdata/minimal.ysh.
+Bug: @name gets ysh-var-sub-face instead of ysh-splice-face."
+  (should (ysh-test--has-face "@my_array" 1 'ysh-splice-face))
+  (should-not (ysh-test--has-face "@my_array" 1 'ysh-var-sub-face)))
+
+;; =====================================================================
+;; Stage 2: case statement (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/case-keyword ()
+  "case (42) { ... } — 'case' is a keyword.
+From testdata/minimal.ysh."
+  (should (ysh-test--has-face "case (42) {" 1 'font-lock-keyword-face)))
+
+;; =====================================================================
+;; Stage 3: J8 string escape sequences (from details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/j8-byte-escape ()
+  "b'byte \\yff what' — \\yff is a J8 byte escape.
+From testdata/details.ysh."
+  (let ((text "echo b'byte \\yff what'"))
+    ;; \\yff (positions 13-16) should be j8-escape-face
+    (should (ysh-test--has-face text 13 'ysh-j8-escape-face))
+    (should (ysh-test--has-face text 14 'ysh-j8-escape-face))))
+
+(ert-deftest ysh-stage3/j8-unicode-brace ()
+  "b'mu = \\u{3bc}' — \\u{3bc} is a J8 unicode escape.
+From testdata/details.ysh."
+  (let ((text "echo b'mu = \\u{3bc}'"))
+    ;; \\u{3bc} (positions 13-19) should be j8-escape-face
+    (should (ysh-test--has-face text 13 'ysh-j8-escape-face))
+    (should (ysh-test--has-face text 14 'ysh-j8-escape-face))))
+
+;; =====================================================================
+;; Stage 2: builtin procs (from details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/builtin-pushd ()
+  "pushd /tmp — 'pushd' is a builtin.
+From testdata/details.ysh."
+  (should (ysh-test--has-face "pushd /tmp" 1 'font-lock-builtin-face)))
+
+(ert-deftest ysh-stage3/builtin-popd ()
+  "popd — 'popd' is a builtin.
+From testdata/details.ysh."
+  (should (ysh-test--has-face "popd" 1 'font-lock-builtin-face)))
+
+;; =====================================================================
+;; Stage 2: json/pp as multi-word builtins (from false-positive.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/builtin-json-write ()
+  "json write (args) — 'json' is a builtin.
+From testdata/false-positive.ysh."
+  (should (ysh-test--has-face "json write (args)" 1 'font-lock-builtin-face)))
+
+;; =====================================================================
+;; Stage 2: expression not-in keyword (from details.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/expr-not-in ()
+  "if ('key' not in mydict) — 'not' and 'in' are expression keywords.
+From testdata/details.ysh."
+  (let ((text "if ('key' not in mydict) {"))
+    ;; 'not' should be keyword
+    (should (ysh-test--has-face text 11 'font-lock-keyword-face))
+    ;; 'in' should be keyword
+    (should (ysh-test--has-face text 15 'font-lock-keyword-face))))
+
+(ert-deftest ysh-stage2/expr-and-or ()
+  "if (true and false or null) — 'and'/'or' are expression keywords.
+From testdata/details.ysh."
+  (let ((text "if (true and false or null) {"))
+    ;; 'and' should be keyword
+    (should (ysh-test--has-face text 10 'font-lock-keyword-face))
+    ;; 'or' should be keyword
+    (should (ysh-test--has-face text 20 'font-lock-keyword-face))))
+
+;; =====================================================================
+;; Stage 2: = and call with bare expressions
+;; (from recursive-modes.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/equals-sigil-pairs ()
+  "= :| $x $(echo) @(echo) $[42+1] @[a] | — various sigils after =.
+From testdata/recursive-modes.ysh."
+  (let ((text "= :| $x $(echo hi) @(echo hi) $[42+1] @[a] |"))
+    ;; = is keyword
+    (should (ysh-test--has-face text 1 'font-lock-keyword-face))))
+
+(ert-deftest ysh-stage2/equals-backslash-escapes ()
+  "= :| \\' \\\" \\$ \\@ \\( \\) \\[ \\] | — backslash escapes in :| |.
+From testdata/recursive-modes.ysh."
+  (let ((text "= :| \\' \\\" \\$ \\@ \\( \\) \\[ \\] |"))
+    ;; \\' should be backslash-face
+    (should (ysh-test--has-face text 6 'ysh-backslash-face))))
+
+;; =====================================================================
+;; Stage 2: if without space before paren
+;; (from recursive-modes.ysh — noted as edge case)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/builtin-after-open-brace ()
+  "if (42) { echo yes } — 'echo' after { should be builtin.
+Bug: first-word-prefix doesn't include { as a command separator."
+  (let ((text "if (42) { echo yes }"))
+    ;; 'echo' after { should be builtin (pos 11)
+    (should (ysh-test--has-face text 11 'font-lock-builtin-face))))
+
+;; =====================================================================
+;; Stage 1: triple-DQ with embedded quotes (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage1/triple-dq-embedded-single-quote ()
+  "echo \"\"\"\\n  one \"\\n  two \"\"\\n  \"\"\" — embedded single/double quotes.
+From testdata/minimal.ysh."
+  (let ((text "echo \"\"\"\n  $r1\n  one \"\n  two \"\"\n  \"\"\""))
+    ;; 'one' on line 3 should be string (col 2 = 'o')
+    (should (eq (ysh-test--face-at-col text 3 2) 'font-lock-string-face))))
+
+;; =====================================================================
+;; Stage 1: dollar-triple-DQ (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage1/dollar-triple-dq ()
+  "echo $\"\"\"\\n  $r1\\n  \"\"\" — dollar triple DQ string.
+From testdata/minimal.ysh."
+  (let ((text "echo $\"\"\"\n  $r1\n  \"\"\""))
+    ;; Content on line 2 should be string (col 2 = '$')
+    (should (eq (ysh-test--face-at-col text 2 2) 'font-lock-string-face))))
+
+;; =====================================================================
+;; Stage 3: var-sub inside DQ with suffixes (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/var-sub-in-path ()
+  "echo $base_dir/file — var sub followed by /file.
+From testdata/minimal.ysh."
+  (let ((text "echo $base_dir/file"))
+    ;; $base_dir should be var-sub
+    (should (ysh-test--has-face text 6 'ysh-var-sub-face))
+    ;; /file should NOT be var-sub
+    (should-not (ysh-test--has-face text 16 'ysh-var-sub-face))))
+
+(ert-deftest ysh-stage3/var-sub-with-suffix-in-dq ()
+  "echo \"$base_dir/file\" — var sub with suffix inside DQ.
+From testdata/minimal.ysh."
+  (let ((text "echo \"$base_dir/file\""))
+    ;; $base_dir should be var-sub
+    (should (ysh-test--has-face text 7 'ysh-var-sub-face))))
+
+;; =====================================================================
+;; Stage 3: multi-line $() command sub (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/multi-line-command-sub ()
+  "echo $( echo 1 ... ) — multi-line command sub.
+From testdata/minimal.ysh."
+  (let ((text "echo $(\n  echo 1\n  echo 2\n  )"))
+    ;; 'echo' at beginning (pos 1) should be builtin
+    (should (ysh-test--has-face text 1 'font-lock-builtin-face))))
+
+;; =====================================================================
+;; Stage 2: false-positive — echo notbare = 42
+;; (from false-positive.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/notbare-equals ()
+  "echo notbare = 42 — '=' after non-whitespace is NOT a keyword.
+From testdata/false-positive.ysh."
+  (let ((text "echo notbare = 42"))
+    ;; 'echo' is builtin
+    (should (ysh-test--has-face text 1 'font-lock-builtin-face))
+    ;; '=' should NOT be keyword (it's an argument)
+    (should-not (ysh-test--has-face text 14 'font-lock-keyword-face))))
+
+;; =====================================================================
+;; Stage 2: false-positive — 'calling' should not match 'call'
+;; (from false-positive.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage2/echo-calling-not-keyword ()
+  "echo calling — 'calling' should not partially match 'call'.
+From testdata/false-positive.ysh."
+  (should-not (ysh-test--has-face "echo calling" 6 'font-lock-keyword-face)))
+
+;; =====================================================================
+;; Stage 3: var-sub in DQ bad patterns (from minimal.ysh)
+;; =====================================================================
+
+(ert-deftest ysh-stage3/var-sub-bad-1a ()
+  "echo bad $1a — $1a is NOT a valid var sub.
+From testdata/minimal.ysh: 'echo bad $00 $1a'."
+  (let ((text "echo bad $1a"))
+    ;; $1 is var-sub but 'a' should NOT be
+    (should-not (ysh-test--has-face text 12 'ysh-var-sub-face))))
+
 (provide 'ysh-mode-tests)
 ;;; ysh-mode-tests.el ends here
