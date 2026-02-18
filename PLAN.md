@@ -101,75 +101,51 @@ Fixed `syntax-propertize` to correctly handle:
 Key discovery: Emacs 31.0.50 has completely non-functional `\@!` and `\@=`
 regex assertions — even the manual's own examples fail. All code avoids these.
 
-### Phase 2: Stage 2 — Recursive Lexer Modes 🔴
+### Phase 2: Stage 2 — Recursive Lexer Modes ✅
 
-**Status: 4 failing tests**
+**Status: COMPLETE** (18/18 tests green)
 
-| Test | Issue |
-|------|-------|
-| `echo-for-not-keyword` | `for` highlighted as keyword in `echo for` |
-| `echo-and-not-keyword` | `and` highlighted as keyword in `echo and` |
-| `nested-dq-in-expr-sub` | Inner `"` in `$[mydict["word"]]` breaks outer string |
-| `nested-dq-deep` | Inner `"` in `$["inner"]` breaks outer string |
+Fixed two categories of issues:
 
-This is the hardest phase — implementing the recursive mode tracking that
-Vim expresses with `syn cluster` + `syn region contains=`.
+- **Keyword context**: Shell keywords (`for`, `while`, etc.) now anchored to
+  first-word position using the same `first-word-prefix` as builtins. Expression
+  keywords (`and`, `or`, `not`, etc.) use a `ysh--match-expr-keyword` matcher
+  function that only applies when an expression-opening keyword (`var`, `const`,
+  `if`, `while`, etc.) appears earlier on the same line. Uses `save-match-data`
+  to prevent match-data clobbering during the context check.
 
-**Approach**: A linear scanner function that walks the buffer maintaining a
-mode stack. Translating from `lib-command-expr-dq.vim`:
+- **Nested double quotes**: Changed `"` from string-delimiter to punctuation in
+  the syntax table. ALL double-quoted strings are now handled in
+  `syntax-propertize` via a recursive scanner:
+  - `ysh--scan-dq-content`: scans forward from opening `"`, handling `\`
+    escapes, `$[` expression subs, and the closing `"`
+  - `ysh--scan-expr-sub`: tracks bracket depth for `$[...]`, skipping inner
+    `"..."` strings WITHOUT marking them (the outer string's delimiters already
+    span the whole range, so inner content gets string-face from the enclosing
+    string)
+  - This correctly handles `echo "nested $[mydict["word"]] quotes"`
 
-| Trigger | From → To | Vim equivalent |
-|---------|-----------|----------------|
-| `var const setvar setglobal call` first-word | command → expression (until `;`/`\n`/`#`) | `exprAfterKeyword` |
-| `= ` first-word | command → expression | `equalsRegex` |
-| `proc func` first-word | command → signature | `nextgroup=procName` |
-| `$[` | any → expression (until `]`) | `exprSub` |
-| `@[` | any → expression (until `]`) | `exprSplice` |
-| `^[` | any → expression (until `]`) | `caretExpr` |
-| `$(` | any → command (until `)`) | `commandSub` |
-| `@(` | any → command (until `)`) | `commandSplice` |
-| `^(` | any → command (until `)`) | `caretCommand` |
-| `"` | command/expression → dq-string (until `"`) | `dqString` |
-| `$"` | any → dq-string (until `"`) | `dollarDqString` |
-| `(` | expression → nested-expression (until `)`) | `nestedParen` |
-| `[` | expression → nested-expression (until `]`) | `nestedBracket` |
-| `{` | expression → nested-expression (until `}`) | `nestedBrace` |
-| `:\|` | expression → array-mode (until `\|`) | `yshArrayLiteral` |
-| ` (` space-paren | command → expression (until `)`) | `spaceParen` |
-| ` [` space-bracket | command → expression (until `]`) | `lazyTypedArgs` |
+### Phase 3: Stage 3 — Details Within Each Mode ✅
 
-The scanner applies a `ysh-context` text property (`command`/`expression`/
-`dq-string`) to each region. Font-lock keyword matchers then check this
-property to decide whether to apply faces.
+**Status: COMPLETE** (18/18 tests green)
 
-### Phase 3: Stage 3 — Details Within Each Mode 🔴
+Fixed three categories of font-lock keyword issues:
 
-**Status: 5 failing tests**
+- **Backslash-face regex**: Emacs 31 `\]` inside character classes is broken
+  (same class of bug as `\@!`). Fix: put `]` first in the class using the
+  standard POSIX trick (`[]#'..."$@(){}\\[]` instead of `[#'..."$@(){}\\\[\]]`).
 
-| Test | Issue |
-|------|-------|
-| `var-sub-number` | `$0` not getting var-sub face (`$` has expression-prefix syntax) |
-| `var-sub-braced-number` | `${11}` not getting var-sub face |
-| `var-sub-in-dq` | `$name` inside `"..."` not highlighted as var-sub |
-| `backslash-in-command` | `\{` not getting backslash face |
-| `backslash-dollar` | `\$name` — the `$` still gets var-sub face despite `\` |
+- **Variable substitutions**: Replaced individual regex-based font-lock
+  keywords with a `ysh--match-var-sub` matcher function. Uses `t` override
+  (so it applies over syntactic string-face). Checks `syntax-ppss` to allow
+  `$name` inside double-quoted strings but skip single-quoted strings. Checks
+  preceding character to skip `\$name` (backslash-escaped). Moved before
+  numeric literal rules so `$0` matches before `0` gets constant-face (nil
+  override means first-match-wins for the entire matched range).
 
-These require fixing font-lock keyword interactions with the syntax layer:
-
-- **Variable substitutions** (`$name`, `${name}`, `$0`, `${12}`): The `$` has
-  syntax class `'` (expression prefix) in the syntax table, which may interfere
-  with regex matching. Need to ensure font-lock rules match correctly and apply
-  inside double-quoted strings but not single-quoted strings.
-
-- **Backslash-quoted characters**: `\$` should prevent `$name` from being
-  treated as a substitution. The backslash face and the var-sub face need
-  correct priority ordering in font-lock-keywords.
-
-- **Context-dependent backslash meaning** (future):
-  - Commands: `\# \' \" \$ \@ \( \) \{ \} \\ \[ \]`
-  - DQ strings: `\$ \" \\` (NOT `\n`)
-  - J8 strings: `\n \t \' \\ \yff \u{...}`
-  - Expressions: `\n` is a valid newline
+- **Rule ordering**: Backslash → var-sub → sigil-pair → constants → numerics.
+  This ensures `\$` gets backslash-face before `$name` is considered, and
+  `$0` gets var-sub-face before `0` gets constant-face.
 
 ### Phase 4: Test Suite & Validation
 
@@ -210,7 +186,7 @@ ysh-mode/
 | Stage | Tests | Pass | Fail | Notes |
 |-------|-------|------|------|-------|
 | Stage 1 (comments + strings) | 22 | 22 | 0 | ✅ Complete |
-| Stage 2 (recursive modes) | 18 | 14 | 4 | Needs mode-tracking scanner |
-| Stage 3 (mode details) | 18 | 13 | 5 | Needs font-lock keyword fixes |
-| Integration | 4 | 4 | 0 | ✅ |
-| **Total** | **72** | **63** | **9** | |
+| Stage 2 (recursive modes) | 18 | 18 | 0 | ✅ Complete |
+| Stage 3 (mode details) | 18 | 18 | 0 | ✅ Complete |
+| Integration | 4 | 4 | 0 | ✅ Complete |
+| **Total** | **72** | **72** | **0** | **✅ ALL GREEN** |
