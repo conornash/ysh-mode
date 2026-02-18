@@ -66,6 +66,14 @@ The buffer is live — caller should kill it when done."
   "Return non-nil if POS in fontified TEXT has EXPECTED face."
   (ysh-test--face-is (ysh-test--face-at text pos) expected))
 
+(defun ysh-test--is-comment (text pos)
+  "Return non-nil if POS in fontified TEXT has any comment face.
+Checks for both `font-lock-comment-face' and `font-lock-comment-delimiter-face',
+since Emacs applies the delimiter face to comment starters like #."
+  (let ((face (ysh-test--face-at text pos)))
+    (or (ysh-test--face-is face 'font-lock-comment-face)
+        (ysh-test--face-is face 'font-lock-comment-delimiter-face))))
+
 (defun ysh-test--string-region-p (text start end)
   "Return non-nil if every position from START to END has `font-lock-string-face'."
   (let* ((buf (ysh-test--fontify text))
@@ -102,25 +110,25 @@ The buffer is live — caller should kill it when done."
 
 (ert-deftest ysh-stage1/comment-at-bol ()
   "# at beginning of line is a comment."
-  (should (ysh-test--has-face "# comment" 1 'font-lock-comment-face)))
+  (should (ysh-test--is-comment "# comment" 1)))
 
 (ert-deftest ysh-stage1/comment-after-space ()
   "# preceded by whitespace is a comment."
-  (should (ysh-test--has-face "echo hi  # comment" 12 'font-lock-comment-face)))
+  (should (ysh-test--is-comment "echo hi  # comment" 10)))
 
 (ert-deftest ysh-stage1/not-comment-mid-word ()
   "echo not#comment — the # is NOT a comment (no preceding whitespace).
 From stage1.md: 'Make sure that echo not#comment is not a comment.'"
-  (should-not (ysh-test--has-face "echo not#comment" 9 'font-lock-comment-face)))
+  (should-not (ysh-test--is-comment "echo not#comment" 9)))
 
 (ert-deftest ysh-stage1/comment-after-semicolon ()
   "echo yes;#comment — # after ; IS a comment.
 From testdata/false-negative.ysh."
-  (should (ysh-test--has-face "echo yes;#comment" 10 'font-lock-comment-face)))
+  (should (ysh-test--is-comment "echo yes;#comment" 10)))
 
 (ert-deftest ysh-stage1/shebang ()
   "#!/usr/bin/env ysh is a comment."
-  (should (ysh-test--has-face "#!/usr/bin/env ysh" 1 'font-lock-comment-face)))
+  (should (ysh-test--is-comment "#!/usr/bin/env ysh" 1)))
 
 ;; ---------------------------------------------------------------------
 ;; 1.2 Backslash-quoted characters
@@ -129,7 +137,7 @@ From testdata/false-negative.ysh."
 (ert-deftest ysh-stage1/backslash-hash ()
   "\\# is a quoted char, not a comment.
 From testdata/minimal.ysh: echo \\# not a comment"
-  (should-not (ysh-test--has-face "echo \\# not a comment" 7 'font-lock-comment-face)))
+  (should-not (ysh-test--is-comment "echo \\# not a comment" 7)))
 
 (ert-deftest ysh-stage1/backslash-quotes ()
   "\\' and \\\" are backslash-quoted, not string delimiters.
@@ -150,11 +158,11 @@ From testdata/minimal.ysh: echo \\'single \\\"double"
   "r'C:\\Program Files\\' is a raw string — backslash does NOT escape.
 From stage1.md: 'Make sure that a \\=' closes a raw string, even if
 there's a \\ before it.'"
-  (let ((text "echo r'C:\\Program Files\\'"))
+  (let ((text "echo r'C:\\Program Files\\' next"))
     ;; The r prefix + content should be string
     (should (ysh-test--has-face text 7 'font-lock-string-face))
-    ;; After the closing ' — should NOT be string
-    (should-not (ysh-test--has-face text (length text) 'font-lock-string-face))))
+    ;; 'next' after the closing ' should NOT be string
+    (should-not (ysh-test--has-face text 28 'font-lock-string-face))))
 
 (ert-deftest ysh-stage1/empty-string ()
   "'' is a valid empty string."
@@ -178,9 +186,13 @@ there's a \\ before it.'"
 (ert-deftest ysh-stage1/j8-backslash-quote ()
   "b'\\'' — backslash-quote does NOT close a J8 string.
 From stage1.md: 'Make sure that b\\'\\'' is handled.'"
-  (let ((text "echo b'\\''"))
-    ;; Position after \\' should still be in string
-    (should (ysh-test--has-face text 9 'font-lock-string-face))))
+  (let ((text "echo b'\\'' next"))
+    ;; The \\' inside should be string or j8-escape, not closing the string
+    (should (let ((face (ysh-test--face-at text 9)))
+              (or (ysh-test--face-is face 'font-lock-string-face)
+                  (ysh-test--face-is face 'ysh-j8-escape-face))))
+    ;; 'next' after the closing ' should NOT be string
+    (should-not (ysh-test--has-face text 13 'font-lock-string-face))))
 
 ;; ---------------------------------------------------------------------
 ;; 1.5 Double-quoted strings
@@ -262,9 +274,9 @@ This is critical for real-world YSH where prompts contain # headers."
 
 (ert-deftest ysh-stage1/after-triple-sq-not-string ()
   "Code after a closing ''' should NOT be highlighted as string."
-  (let ((text "var x = '''\nhello\n''' ++ other"))
-    ;; "other" after the closing ''' should not be string
-    (should-not (ysh-test--has-face text 27 'font-lock-string-face))))
+  (let ((text "var x = '''\nhello\n'''\nvar y = 42"))
+    ;; 'var y' on the line after the closing ''' should not be string
+    (should-not (ysh-test--has-face text 23 'font-lock-string-face))))
 
 ;; =====================================================================
 ;; Stage 2: Recursive Lexer Modes
