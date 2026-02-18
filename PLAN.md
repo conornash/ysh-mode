@@ -154,22 +154,32 @@ Fixed three categories of font-lock keyword issues:
       <https://pages.oils.pub/oils-vim/>
 - [ ] Regression test with real-world files (wrens-iterate.ysh)
 
-### Phase 5: ysh-ts-mode (Tree-sitter, parallel track)
+### Phase 5: ysh-ts-mode (Tree-sitter, parallel track) ✅
 
-- [ ] Evaluate `tree-sitter-ysh` grammar accuracy against testdata
-- [ ] Improve `ysh-ts-mode` font-lock rules using tree-sitter node types
-- [ ] Share infrastructure via `ysh-base-mode` (faces, indent, nav, imenu)
-- [ ] `syntax-propertize` for tree-sitter mode (needed for `forward-sexp` etc.)
+**Status: COMPLETE** (15/15 tests green)
+
+- [x] Compiled and installed `tree-sitter-ysh` grammar from danyspin97
+- [x] Wrote `ysh-ts-mode.el` with font-lock rules mapped from 37 grammar
+      node types (comments, strings, keywords, definitions, commands,
+      builtins, variables, numbers, escapes, operators, punctuation)
+- [x] Indentation rules for blocks, compound statements, lists
+- [x] Imenu support for proc/func definitions
+- [x] Navigation via `treesit-defun-type-regexp` / `treesit-sentence-type-regexp`
+- [x] 15 ERT tests: highlighting (12) + parse-error-free (1) + grammar check (2)
+- [ ] Share infrastructure via `ysh-base-mode` (faces, indent, nav) — future
+- [ ] Upstream grammar has parse errors on 3/6 testdata files (not our bug)
 
 ## File Structure
 
 ```
 ysh-mode/
-├── PLAN.md              ← this file
+├── PLAN.md                 ← this file
 ├── README.org
-├── ysh-mode.el          # Font-lock mode (Stages 1–3 coarse parsing)
-├── ysh-mode-tests.el    # ERT test suite (72 tests)
-├── testdata/            # Copied from oils.vim
+├── ysh-mode.el             # Font-lock mode (Stages 1–3 coarse parsing)
+├── ysh-mode-tests.el       # ERT tests for ysh-mode (74 tests)
+├── ysh-ts-mode.el          # Tree-sitter mode (Emacs 29+)
+├── ysh-ts-mode-tests.el    # ERT tests for ysh-ts-mode (15 tests)
+├── testdata/               # Copied from oils.vim
 │   ├── minimal.ysh
 │   ├── recursive-modes.ysh
 │   ├── details.ysh
@@ -177,8 +187,7 @@ ysh-mode/
 │   ├── false-negative.ysh
 │   └── nested-double-quotes.ysh
 └── (future)
-    ├── ysh-base.el      # Shared faces, customization, indent, nav
-    └── ysh-ts-mode.el   # Tree-sitter mode
+    └── ysh-base.el         # Shared faces, customization, indent, nav
 ```
 
 ## Test Scorecard
