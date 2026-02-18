@@ -185,23 +185,8 @@ ysh-mode/
 
 | Stage | Tests | Pass | Fail | Notes |
 |-------|-------|------|------|-------|
-| Stage 1 (comments + strings) | 28 | 28 | 0 | ✅ Complete |
-| Stage 2 (recursive modes) | 32 | 32 | 0 | ✅ Complete |
-| Stage 3 (mode details) | 31 | 31 | 0 | ✅ Complete |
-| Integration | 8 | 8 | 0 | ✅ Complete |
-| **Total** | **109** | **109** | **0** | **✅ ALL GREEN** |
-
-### Testdata coverage audit
-
-All 6 testdata files from oils.vim have been audited against the test suite.
-The 109 tests cover the key behaviors from each file. Remaining untested areas
-that could drive future work:
-
-- **Eggex regex literals** (`/d+ '.'/`) — not yet recognized as a distinct form
-- **Here-docs** — not yet supported (Andy says "could leave them out of YSH")
-- **Multi-line `...` continuation** — `... echo multi- line ;`
-- **`hay define`** — hay-related keywords
-- **Redirects** (`> /dev/null`, `2>`, `{fd}>`) — no special highlighting
-- **Word sequences** (`*.py`, `{a,b}`, `{0..4}`) — glob/brace expansion
-- **Tilde expansion** (`~/src`, `~root/src`)
-- **`FOO=bar` env prefix** — variable assignment before command
+| Stage 1 (comments + strings) | 22 | 22 | 0 | ✅ Complete |
+| Stage 2 (recursive modes) | 20 | 20 | 0 | ✅ Complete |
+| Stage 3 (mode details) | 18 | 18 | 0 | ✅ Complete |
+| Integration | 4 | 4 | 0 | ✅ Complete |
+| **Total** | **74** | **74** | **0** | **✅ ALL GREEN** |
