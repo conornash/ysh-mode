@@ -1,0 +1,263 @@
+var x = 42  # integer
+
+func f(x; offset=0) { return (x) }
+
+func myFunc(x; delimiter=r'\', other="hi $x") { return (x) }
+
+proc my-proc(x, y; d=$(echo hi)) { echo hi }
+proc my-proc(x, y; d=$(echo 2)) { echo hi }
+
+var y = f(42)  # function call
+
+var z = f(42; offset=5)  # semi-colon doesn't end the expression
+
+# comment afterward
+var r2 = r'C:\Program # Files\' # r'' prefix is allowed
+
+var a = [0, 1, 2]
+
+# nested
+var b = [a[2], a[1], a[0], f(1)]
+
+var c = (f(2), f(1), f(0), a[0], {})
+
+# bare assignment
+hay define Package
+Package foo {
+  x = 42 + f(1)
+  y = ['foo', "$y"]
+  multi_line = [
+    'a',
+    'b',
+    $(echo hi),
+  ]
+}
+
+pp (1 + (a[1] + 3)); echo next
+
+pp (1 + 
+    (a[1] + 3)); echo next
+# f(x)
+
+pp ('hi' ++ "hi $x" ++ r'c:\' ++ b'\n')
+
+echo {a,b}@example.com
+
+# we need a space to highlight, but that's OK for now
+if(42) { echo yes }
+
+if (42 > a[0]) {
+  echo 'yes'
+}
+
+for i, item in (a) {
+  echo "$i $item"
+}
+
+pp [a]
+
+  pp  (${x} ++ $(echo hi) ++ 'hi')
+  pp  [${x} ++ $(echo hi) ++ 'hi']
+
+# Note: this isn't confused for a lazy typed arg, because there's no leading
+# space
+echo *.[ch]
+
+# Backslash escapes
+
+echo \( hi \) \[ hi \]
+
+
+: '''
+" TODO:
+"
+" More structure
+"
+" - backslash escapes within strings:
+"    - \" \$ in double quotes
+"    - \u{123456} in J8-style strings
+"
+" - Is there way to understand recursion like ${a:-'foo'}?  Or just leave that
+"   out
+" - There is also recursion of $(hostname) and such.
+"
+" - Here docs?  They are hard, could leave them out of YSH
+'''
+
+var foods = :| 
+  pea nut 
+  # comment
+  other
+  \(
+|
+
+#
+# Copied from notes.md
+#
+
+# Command mode -> Expression
+
+    var y = f(42)
+    var y = f('str' ++ "hi $x")
+
+    =  f(42)
+    call  f(42)
+    pp (f(42))
+    pp [f(42)]
+
+    echo ls --flag=$[x + 1]; echo next   # newline not allowed in $[]
+    # escape dollar
+    echo ls --flag=\$[x + 1]  
+
+    echo @[glob('*.py')]; echo next  # newline not allowed in @[]
+    # escape
+    echo \@[glob]
+
+# Command mode -> Double quoted
+
+    echo "hi $x"
+    echo $"explicit $x"
+
+# Expression mode -> Command
+
+    = :| foo.txt *.py "$x" |   # note: no redirects here though
+    = :| $x $(echo hi) @(echo hi) $[42+1] @[a] |   # note: no redirects here though
+    = :| \' \" \$ \@ \( \) \[ \] |   # backslash quoting
+
+    = $(echo 'command sub' $(echo hi) )
+    = @(echo u'spliced command sub' @foods )
+    = ^(echo "unevaluated" $hi $[y + 1])
+
+# Expression mode -> Double Quoted
+
+    = "hi $x"
+    = $"explicit $x"
+    = ^"unevaluated $x"
+    = f(^"unevaluated $x")
+
+# Double-Quoted mode ->
+
+    echo "greeting = $(echo hi)"  # Command
+    echo "sum = $[x + 99]"        # Expression
+
+# No change
+
+    echo $(echo hi)
+    echo @(echo hi)
+
+    # TODO: should implement these two in YSH!
+    #= $[42 + a[i]]
+    #= @[a]
+    = ^[42 + a[i]]
+
+# Multi-line versions
+
+    func g(...args) { return (args[0]) }
+    func myfunc(...args) { return (args[0]) }
+
+    = $(echo 1
+        echo $x 2)
+    = @(echo 3
+        echo 'yo' 4)
+    = ^(echo 5
+        echo "hi $x" 6)
+
+    var y = (42,
+              43,
+              f(5))
+
+    # hard cases with ;
+    var z = f(1); echo hi
+    var z = g(1, 2,
+              3); echo hi
+
+    setvar a[0 + 0] = 42
+
+    = g(42,
+        43,
+        f(5))
+
+    call myfunc(42,
+                43,
+                f(5)); echo next
+
+    call g(3, 4, 5); echo hi
+    call g(3, 4, 5)  # comment
+
+    var d = {
+      k: 1,
+      k: 2,
+    }; echo next
+
+    var d = len({
+      k1: 'value',
+      k2: g(5,
+            6, 7),
+      bracket: [
+        1, 2, 3
+      ],
+    }) + 42
+
+    var mylist = [
+      1,
+      2,
+      f(3),
+      foods[0],
+      {k: 'value'},
+    ]    
+
+    = len({ k: [x, x] }) + 42
+
+# Backslash escaped \( \) \[ \] \{ \}
+
+echo $(echo \( \))
+echo $(echo \[ \])
+echo $(echo \{ \})
+
+# These aren't valid
+#echo $( echo "\( \)" )
+#echo $( echo "\[ \]" )
+#echo $( echo "\{ \}" )
+
+= $(echo \( \))
+= $(echo \[ \])
+= $(echo \{ \})
+
+= ( $(echo \( \)) )
+= ( $(echo \[ \]) )
+= ( $(echo \{ \}) )
+
+= [ $(echo \( \)) ]
+= [ $(echo \[ \]) ]
+= [ $(echo \{ \}) ]
+
+= { k: $(echo \( \)) }
+= { k: $(echo \[ \]) }
+= { k: $(echo \{ \}) }
+
+= $(pp (42))
+= $(pp [42])
+#= $(call f(x))
+
+
+# proc is reserved
+# var proc = 42
+# setvar proc = const + 1
+# echo $setvar
+
+# Builtins can be highlighted?
+# Maybe use a different color
+#
+# Export from YSH
+# - list of builtins - compgen -A builtin?
+#   - this contains deprecated shell builtins like [ . : though
+#   - alias unalias
+#   - I think it's better to have reflection on __builtin_proc__
+# - list of backslash chars
+
+pushd /tmp
+cd /
+popd
+
+# time is a keyword, which takes a pipeline
+time echo hi | wc -l
