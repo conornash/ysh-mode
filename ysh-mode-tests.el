@@ -664,5 +664,310 @@ From testdata/details.ysh."
                        'font-lock-keyword-face)))
       (kill-buffer buf))))
 
+;; =====================================================================
+;; New tests: gaps found by auditing testdata/ against test coverage
+;; =====================================================================
+;; Red/green: these are written to FAIL first, then drive implementation.
+
+;; ---------------------------------------------------------------------
+;; Stage 1 gaps: comments and strings
+;; ---------------------------------------------------------------------
+
+(ert-deftest ysh-stage1/comment-after-keyword ()
+  "const c = 99  # comment — comment after keyword+expression line.
+From testdata/minimal.ysh."
+  (let ((text "const c = 99  # comment"))
+    (should (ysh-test--is-comment text 15))
+    (should (ysh-test--has-face text 1 'font-lock-keyword-face))))
+
+(ert-deftest ysh-stage1/escaped-backslash ()
+  "echo \\\\ — literal backslash (\\\\).
+From testdata/minimal.ysh: echo \\\\ backslash."
+  (let ((text "echo \\\\ backslash"))
+    ;; \\\\ should get backslash face
+    (should (ysh-test--has-face text 6 'ysh-backslash-face))
+    ;; 'backslash' after it should NOT be string or backslash
+    (should-not (ysh-test--has-face text 8 'font-lock-string-face))
+    (should-not (ysh-test--has-face text 8 'ysh-backslash-face))))
+
+(ert-deftest ysh-stage1/escaped-quotes-not-string ()
+  "echo \\'single \\'single — escaped quotes are NOT string delimiters.
+From testdata/minimal.ysh."
+  (let ((text "echo \\'single"))
+    ;; \\' should get backslash face, NOT start a string
+    (should (ysh-test--has-face text 6 'ysh-backslash-face))
+    ;; 'single' after \\' should NOT be string
+    (should-not (ysh-test--has-face text 8 'font-lock-string-face))))
+
+(ert-deftest ysh-stage1/sq-string-after-equals ()
+  "echo ls --foo='bar' — SQ string after = in command args.
+From testdata/minimal.ysh."
+  (let ((text "echo ls --foo='bar'"))
+    (should (ysh-test--has-face text 16 'font-lock-string-face))))
+
+(ert-deftest ysh-stage1/sq-string-no-space ()
+  "var s='s' — SQ string directly after = (no space).
+From testdata/false-negative.ysh."
+  (let ((text "var s='s'"))
+    (should (ysh-test--has-face text 7 'font-lock-string-face))))
+
+(ert-deftest ysh-stage1/string-at-bol ()
+  "'echo' — a string at beginning of line, not a command.
+From testdata/minimal.ysh."
+  (let ((text "'echo'"))
+    ;; Should be string, not builtin
+    (should (ysh-test--has-face text 2 'font-lock-string-face))
+    (should-not (ysh-test--has-face text 2 'font-lock-builtin-face))))
+
+;; ---------------------------------------------------------------------
+;; Stage 2 gaps: keyword context and mode transitions
+;; ---------------------------------------------------------------------
+
+(ert-deftest ysh-stage2/call-keyword ()
+  "call len('str'); echo next — 'call' is a keyword.
+From testdata/minimal.ysh."
+  (should (ysh-test--has-face "call len('str'); echo next" 1
+                              'font-lock-keyword-face)))
+
+(ert-deftest ysh-stage2/bare-equals-keyword ()
+  "= len(g) — bare = at first-word position is a keyword.
+From testdata/minimal.ysh."
+  (should (ysh-test--has-face "= len(g); echo next" 1
+                              'font-lock-keyword-face)))
+
+(ert-deftest ysh-stage2/equals-not-keyword-mid-line ()
+  "echo notbare = 42 — = not at first-word position is NOT a keyword.
+From testdata/false-positive.ysh."
+  (should-not (ysh-test--has-face "echo notbare = 42" 14
+                                  'font-lock-keyword-face)))
+
+(ert-deftest ysh-stage2/keyword-after-double-amp ()
+  "echo hi && var x = 42 — var after && is keyword.
+From testdata/false-positive.ysh."
+  (should (ysh-test--has-face "echo hi && var x = 42" 12
+                              'font-lock-keyword-face)))
+
+(ert-deftest ysh-stage2/keyword-after-double-pipe ()
+  "false || var x = 42 — var after || is keyword.
+From testdata/false-positive.ysh."
+  (should (ysh-test--has-face "false || var x = 42" 10
+                              'font-lock-keyword-face)))
+
+(ert-deftest ysh-stage2/proc-after-pipe ()
+  "echo pipeline | proc p { } — proc after | is keyword.
+From testdata/false-positive.ysh."
+  (should (ysh-test--has-face "echo hi | proc p { echo }" 11
+                              'font-lock-keyword-face)))
+
+(ert-deftest ysh-stage2/call-after-semicolon ()
+  "echo hi;call 42 — call after ; (no space) is keyword.
+From testdata/false-positive.ysh."
+  (should (ysh-test--has-face "echo hi;call 42" 9
+                              'font-lock-keyword-face)))
+
+(ert-deftest ysh-stage2/expr-keyword-not ()
+  "'not' in expression: if ('key' not in mydict) — 'not' is keyword.
+From testdata/details.ysh."
+  (let ((text "if ('key' not in mydict) {"))
+    (should (ysh-test--has-face text 11 'font-lock-keyword-face))))
+
+(ert-deftest ysh-stage2/expr-keyword-is ()
+  "'is' in expression: = {} is {} — 'is' is keyword.
+From testdata/details.ysh."
+  (let ((text "= {} is {}"))
+    (should (ysh-test--has-face text 6 'font-lock-keyword-face))))
+
+(ert-deftest ysh-stage2/ternary-if-else-in-expr ()
+  "= 42 if true else 41 — if/else in expression context.
+From testdata/details.ysh."
+  (let ((text "= 42 if true else 41"))
+    ;; 'if' should be keyword
+    (should (ysh-test--has-face text 6 'font-lock-keyword-face))
+    ;; 'else' should be keyword
+    (should (ysh-test--has-face text 14 'font-lock-keyword-face))))
+
+;; ---------------------------------------------------------------------
+;; Stage 2 gaps: nested expressions in DQ strings
+;; ---------------------------------------------------------------------
+
+(ert-deftest ysh-stage2/expr-sub-in-dq ()
+  "echo \"sum = $[x + 99]\" — $[] inside DQ string.
+From testdata/recursive-modes.ysh."
+  (let ((text "echo \"sum = $[x + 99]\""))
+    ;; 'sum' is string
+    (should (ysh-test--has-face text 7 'font-lock-string-face))
+    ;; closing \" is string
+    (should (ysh-test--has-face text (length text) 'font-lock-string-face))))
+
+(ert-deftest ysh-stage2/command-sub-in-dq ()
+  "echo \"greeting = $(echo hi)\" — $() inside DQ string.
+From testdata/recursive-modes.ysh."
+  (let ((text "echo \"greeting = $(echo hi)\""))
+    ;; 'greeting' is string
+    (should (ysh-test--has-face text 7 'font-lock-string-face))
+    ;; closing \" is string
+    (should (ysh-test--has-face text (length text) 'font-lock-string-face))))
+
+(ert-deftest ysh-stage2/nested-expr-sub-in-expr-sub ()
+  "echo $[42 + mydict[\"h$[ch]\"]] — nested $[] inside $[] inside DQ.
+From testdata/minimal.ysh. The deepest nesting case."
+  (let ((text "echo \"$[42 + mydict[\"h$[ch]\"]]\""))
+    ;; The whole thing is within a DQ string
+    (should (ysh-test--has-face text 7 'font-lock-string-face))))
+
+(ert-deftest ysh-stage2/sq-string-inside-expr-sub ()
+  "echo $[42 + mydict['hi']] — SQ string inside $[].
+From testdata/minimal.ysh."
+  (let ((text "echo $[42 + mydict['hi']]"))
+    ;; Outside string, 'echo' is builtin
+    (should (ysh-test--has-face text 1 'font-lock-builtin-face))))
+
+;; ---------------------------------------------------------------------
+;; Stage 3 gaps: var subs and splices
+;; ---------------------------------------------------------------------
+
+(ert-deftest ysh-stage3/var-sub-mid-word ()
+  "$base_dir/file — var sub at start of word with path after it.
+From testdata/minimal.ysh."
+  (let ((text "echo $base_dir/file"))
+    (should (ysh-test--has-face text 6 'ysh-var-sub-face))))
+
+(ert-deftest ysh-stage3/var-sub-in-dq-mid-word ()
+  "\"$base_dir/file\" — var sub mid-word inside DQ string.
+From testdata/minimal.ysh."
+  (let ((text "echo \"$base_dir/file\""))
+    (should (ysh-test--has-face text 7 'ysh-var-sub-face))))
+
+(ert-deftest ysh-stage3/braced-var-with-operator ()
+  "${file:-} — braced var with :- operator.
+From testdata/minimal.ysh."
+  (let ((text "echo ${file:-}"))
+    (should (ysh-test--has-face text 6 'ysh-var-sub-face))))
+
+(ert-deftest ysh-stage3/braced-var-with-operator-in-dq ()
+  "\"foo ${base_dir:-}\" — braced var with operator inside DQ.
+From testdata/minimal.ysh."
+  (let ((text "echo \"foo ${base_dir:-}\""))
+    (should (ysh-test--has-face text 11 'ysh-var-sub-face))))
+
+(ert-deftest ysh-stage3/braced-number-with-operator ()
+  "${12:-} — braced number with :- operator.
+From testdata/minimal.ysh."
+  (let ((text "echo ${12:-}"))
+    (should (ysh-test--has-face text 6 'ysh-var-sub-face))))
+
+(ert-deftest ysh-stage3/positional-param-boundary ()
+  "$00 is $0 then literal 0, $1a is $1 then literal a.
+From testdata/minimal.ysh: 'echo bad $00 $1a'."
+  (let ((text "echo $0 rest"))
+    ;; $0 gets var-sub face
+    (should (ysh-test--has-face text 6 'ysh-var-sub-face))
+    ;; 'rest' does not
+    (should-not (ysh-test--has-face text 9 'ysh-var-sub-face))))
+
+(ert-deftest ysh-stage3/splice-at-bol ()
+  "@my_array — splice at beginning of line is highlighted.
+From testdata/recursive-modes.ysh."
+  (let ((text "@my_array"))
+    (should (ysh-test--has-face text 1 'ysh-var-sub-face))))
+
+(ert-deftest ysh-stage3/backslash-paren ()
+  "echo \\( hi \\) — backslash-quoted parens.
+From testdata/recursive-modes.ysh."
+  (let ((text "echo \\( hi \\)"))
+    (should (ysh-test--has-face text 6 'ysh-backslash-face))
+    (should (ysh-test--has-face text 12 'ysh-backslash-face))))
+
+(ert-deftest ysh-stage3/backslash-bracket ()
+  "echo \\[ hi \\] — backslash-quoted brackets.
+From testdata/recursive-modes.ysh."
+  (let ((text "echo \\[ hi \\]"))
+    (should (ysh-test--has-face text 6 'ysh-backslash-face))
+    (should (ysh-test--has-face text 12 'ysh-backslash-face))))
+
+(ert-deftest ysh-stage3/escaped-dollar-in-dq ()
+  "echo \"hi $r1 \\$ \\\"\" — escaped $ inside DQ is not var-sub.
+From testdata/minimal.ysh."
+  (let ((text "echo \"hi \\$ end\""))
+    ;; \\$ should be backslash-face, not var-sub
+    (should (ysh-test--has-face text 10 'ysh-backslash-face))
+    (should-not (ysh-test--has-face text 10 'ysh-var-sub-face))))
+
+(ert-deftest ysh-stage3/float-literal ()
+  "= 3.14 — float literal in expression.
+From testdata/details.ysh."
+  (let ((text "var x = 3.14"))
+    (should (ysh-test--has-face text 9 'font-lock-constant-face))))
+
+(ert-deftest ysh-stage3/float-scientific ()
+  "= 3.14e-5 — scientific notation float literal.
+From testdata/details.ysh."
+  (let ((text "var x = 3.14e-5"))
+    (should (ysh-test--has-face text 9 'font-lock-constant-face))))
+
+(ert-deftest ysh-stage3/hex-literal ()
+  "0xFF — hex literal in expression.
+From testdata/details.ysh."
+  (let ((text "var x = 0xFF"))
+    (should (ysh-test--has-face text 9 'font-lock-constant-face))))
+
+;; ---------------------------------------------------------------------
+;; Integration: full-file tests on testdata/
+;; ---------------------------------------------------------------------
+
+(ert-deftest ysh-integration/recursive-modes-strings ()
+  "testdata/recursive-modes.ysh: strings in func signatures."
+  (let ((buf (ysh-test--fontify-file "recursive-modes.ysh")))
+    (unwind-protect
+        (with-current-buffer buf
+          ;; r'\' inside func signature is a string
+          (goto-char (point-min))
+          (should (search-forward "delimiter=r'\\'," nil t))
+          ;; The r'\' content should be string
+          (should (ysh-test--face-is
+                   (get-text-property (- (match-end 0) 3) 'face)
+                   'font-lock-string-face)))
+      (kill-buffer buf))))
+
+(ert-deftest ysh-integration/details-backslash ()
+  "testdata/details.ysh: backslash-quoted chars."
+  (let ((buf (ysh-test--fontify-file "details.ysh")))
+    (unwind-protect
+        (with-current-buffer buf
+          ;; echo \{ \} — \{ should be backslash-face
+          (goto-char (point-min))
+          (should (search-forward "echo \\{" nil t))
+          (should (ysh-test--face-is
+                   (get-text-property (- (match-end 0) 2) 'face)
+                   'ysh-backslash-face)))
+      (kill-buffer buf))))
+
+(ert-deftest ysh-integration/details-expr-keywords ()
+  "testdata/details.ysh: expression keywords in context."
+  (let ((buf (ysh-test--fontify-file "details.ysh")))
+    (unwind-protect
+        (with-current-buffer buf
+          ;; 'if (true and false or null)' — and/or should be keywords
+          (goto-char (point-min))
+          (should (search-forward "true and false" nil t))
+          (should (ysh-test--face-is
+                   (get-text-property (- (match-end 0) 9) 'face)
+                   'font-lock-keyword-face)))
+      (kill-buffer buf))))
+
+(ert-deftest ysh-integration/false-positive-call-after-semi ()
+  "testdata/false-positive.ysh: 'echo hi;call 42' — call is keyword."
+  (let ((buf (ysh-test--fontify-file "false-positive.ysh")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (should (search-forward "echo hi;call 42" nil t))
+          ;; 'call' at position 9 (after ;) should be keyword
+          (let ((call-pos (+ (match-beginning 0) 8)))
+            (should (ysh-test--face-is
+                     (get-text-property call-pos 'face)
+                     'font-lock-keyword-face))))
+      (kill-buffer buf))))
+
 (provide 'ysh-mode-tests)
 ;;; ysh-mode-tests.el ends here

@@ -84,17 +84,27 @@
 (defconst ysh--first-word-prefix "\\(?:^\\|[;|&]\\)\\s-*"
   "Anchors a keyword to the first word position in a command.")
 
-;; Expression keyword regex
+;; Expression keyword regex — includes if/else for ternary expressions
 (defconst ysh--expr-keyword-re
   (concat "\\<"
-          (regexp-opt '("and" "or" "not" "is" "as" "capture") t)
+          (regexp-opt '("and" "or" "not" "is" "as" "capture"
+                        "if" "else")
+                      t)
           "\\>")
-  "Regex matching YSH expression keywords.")
+  "Regex matching YSH expression keywords.
+Includes `if' and `else' because they appear in ternary expressions:
+  = 42 if true else 41
+The shell keyword rules (first-word anchored) handle the block forms.")
 
 ;; Expression-opening keywords that start an expression context
 (defconst ysh--expr-opener-re
-  "\\<\\(?:var\\|const\\|setvar\\|setglobal\\|call\\|if\\|elif\\|while\\|=\\)\\>"
-  "Regex matching keywords that open an expression context on the same line.")
+  (concat "\\(?:"
+          "\\<\\(?:var\\|const\\|setvar\\|setglobal\\|call\\|if\\|elif\\|while\\)\\>"
+          "\\|"
+          "^\\s-*=\\s-"  ; bare = at first-word position
+          "\\)")
+  "Regex matching keywords that open an expression context on the same line.
+The bare `=' uses a separate pattern since `=' is punctuation (no \\\\>).")
 
 (defun ysh--match-expr-keyword (limit)
   "Font-lock matcher for expression keywords up to LIMIT.
