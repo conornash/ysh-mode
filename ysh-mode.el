@@ -84,6 +84,41 @@
 (defconst ysh--first-word-prefix "\\(?:^\\|[;|&]\\)\\s-*"
   "Anchors a keyword to the first word position in a command.")
 
+;; Variable substitution regex — matches $name, ${name...}, $0, ${12...}
+(defconst ysh--var-sub-re
+  (concat "\\$\\(?:"
+          "[a-zA-Z_][a-zA-Z0-9_]*"  ; $name
+          "\\|{[a-zA-Z_][a-zA-Z0-9_]*[^}]*}"  ; ${name...}
+          "\\|[0-9]"                ; $0 .. $9
+          "\\|{[0-9]+[^}]*}"       ; ${12...}
+          "\\)")
+  "Regex matching YSH variable substitutions.")
+
+(defun ysh--match-var-sub (limit)
+  "Font-lock matcher for variable substitutions up to LIMIT.
+Matches $name, ${name}, $0, ${11} etc. but skips matches that:
+ - are inside single-quoted strings (where $ is literal)
+ - are preceded by backslash (\\$name is escaped)"
+  (let ((found nil))
+    (while (and (not found)
+                (re-search-forward ysh--var-sub-re limit t))
+      (let* ((beg (match-beginning 0))
+             (ppss (save-excursion (syntax-ppss beg)))
+             (in-string (nth 3 ppss))
+             (prev-char (and (> beg 1) (char-before beg))))
+        (cond
+         ;; Skip if preceded by backslash (escaped)
+         ((eql prev-char ?\\) nil)
+         ;; Skip if inside a comment
+         ((nth 4 ppss) nil)
+         ;; Inside a string: only match in double-quoted ("), not single (')
+         (in-string
+          (when (eql in-string ?\")
+            (setq found t)))
+         ;; Not in a string: always match
+         (t (setq found t)))))
+    found))
+
 ;; ---------------------------------------------------------------------
 ;; Font-lock keywords
 ;; ---------------------------------------------------------------------
@@ -147,17 +182,19 @@
                 "\\>")
        1 font-lock-builtin-face)
 
-      ;; ----- Expression atoms (from lib-details.vim) -----
-      ;; null true false
-      ("\\<\\(null\\|true\\|false\\)\\>" . font-lock-constant-face)
-      ;; Numeric literals
-      ("\\<[0-9]+\\(?:\\.[0-9]+\\)?\\(?:[eE][-+]?[0-9]+\\)?\\>" . font-lock-constant-face)
-      ;; 0x hex literals
-      ("\\<0[xX][0-9a-fA-F]+\\>" . font-lock-constant-face)
-
       ;; ----- Backslash-quoted chars (from stage3.vim) -----
       ;; \# \' \" \$ \@ \( \) \{ \} \\ \[ \]
-      ("\\\\[#'\"$@(){}\\\\\\[\\]]" . 'ysh-backslash-face)
+      ;; MUST come before var-sub rules so \$ gets backslash-face.
+      ;; Note: ] must be first in the character class (Emacs 31 bug with \]).
+      ("\\\\[]#'\"$@(){}\\\\[]" 0 'ysh-backslash-face t)
+
+      ;; ----- Variable substitutions (from lib-details.vim) -----
+      ;; MUST come before numeric literals so $0 beats plain 0.
+      ;; Override t: apply inside double-quoted strings (overrides string-face).
+      ;; The matcher function skips single-quoted string contexts.
+      (ysh--match-var-sub 0 'ysh-var-sub-face t)
+      ;; @splice  (at start of line or after whitespace)
+      (,(concat "\\(?:^\\|\\s-\\)\\(@" ysh--var-name-re "\\)") 1 'ysh-var-sub-face)
 
       ;; ----- Sigil pairs: delimiters (from lib-command-expr-dq.vim) -----
       ;; $( $[ @( @[ ^( ^[  and their closing counterparts
@@ -165,17 +202,13 @@
       ;; :| array literal opener
       ("\\(:|\\)" 1 'ysh-sigil-pair-face)
 
-      ;; ----- Variable substitutions (from lib-details.vim) -----
-      ;; $name
-      (,(concat "\\$" ysh--var-name-re) . 'ysh-var-sub-face)
-      ;; ${name ...}
-      (,(concat "\\${" ysh--var-name-re "[^}]*}") . 'ysh-var-sub-face)
-      ;; $0 .. $9
-      ("\\$[0-9]" . 'ysh-var-sub-face)
-      ;; ${12 ...}
-      ("\\${[0-9]+[^}]*}" . 'ysh-var-sub-face)
-      ;; @splice  (at start of line or after whitespace)
-      (,(concat "\\(?:^\\|\\s-\\)\\(@" ysh--var-name-re "\\)") 1 'ysh-var-sub-face)
+      ;; ----- Expression atoms (from lib-details.vim) -----
+      ;; null true false
+      ("\\<\\(null\\|true\\|false\\)\\>" . font-lock-constant-face)
+      ;; Numeric literals
+      ("\\<[0-9]+\\(?:\\.[0-9]+\\)?\\(?:[eE][-+]?[0-9]+\\)?\\>" . font-lock-constant-face)
+      ;; 0x hex literals
+      ("\\<0[xX][0-9a-fA-F]+\\>" . font-lock-constant-face)
 
       ;; ----- Special variables -----
       ("\\<\\(ARGV\\|ARGS\\|ENV\\|_reply\\|_status\\|_error\\)\\>" . font-lock-variable-name-face)
