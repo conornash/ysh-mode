@@ -84,6 +84,88 @@
 (defconst ysh--first-word-prefix "\\(?:^\\|[;|&]\\)\\s-*"
   "Anchors a keyword to the first word position in a command.")
 
+;; Expression keyword regex — includes if/else for ternary expressions
+(defconst ysh--expr-keyword-re
+  (concat "\\<"
+          (regexp-opt '("and" "or" "not" "is" "as" "capture"
+                        "if" "else")
+                      t)
+          "\\>")
+  "Regex matching YSH expression keywords.
+Includes `if' and `else' because they appear in ternary expressions:
+  = 42 if true else 41
+The shell keyword rules (first-word anchored) handle the block forms.")
+
+;; Expression-opening keywords that start an expression context
+(defconst ysh--expr-opener-re
+  (concat "\\(?:"
+          "\\<\\(?:var\\|const\\|setvar\\|setglobal\\|call\\|if\\|elif\\|while\\)\\>"
+          "\\|"
+          "^\\s-*=\\s-"  ; bare = at first-word position
+          "\\)")
+  "Regex matching keywords that open an expression context on the same line.
+The bare `=' uses a separate pattern since `=' is punctuation (no \\\\>).")
+
+(defun ysh--match-expr-keyword (limit)
+  "Font-lock matcher for expression keywords up to LIMIT.
+Matches `and', `or', `not', `is', `as', `capture' only when they
+appear to be in an expression context — i.e., on a line that contains
+an expression-opening keyword before the match.  This prevents
+`echo and' from highlighting `and' as a keyword."
+  (let ((found nil))
+    (while (and (not found)
+                (re-search-forward ysh--expr-keyword-re limit t))
+      (let* ((beg (match-beginning 0))
+             (ppss (save-excursion (syntax-ppss beg))))
+        ;; Skip if inside a string or comment
+        (unless (or (nth 3 ppss) (nth 4 ppss))
+          ;; Check if there's an expression-opening keyword earlier on this line.
+          ;; save-match-data is critical: the inner search must not clobber
+          ;; the match-data that font-lock will use to apply the face.
+          (let ((has-opener
+                 (save-excursion
+                   (save-match-data
+                     (goto-char (line-beginning-position))
+                     (re-search-forward ysh--expr-opener-re beg t)))))
+            (when has-opener
+              (setq found t))))))
+    found))
+
+;; Variable substitution regex — matches $name, ${name...}, $0, ${12...}
+(defconst ysh--var-sub-re
+  (concat "\\$\\(?:"
+          "[a-zA-Z_][a-zA-Z0-9_]*"  ; $name
+          "\\|{[a-zA-Z_][a-zA-Z0-9_]*[^}]*}"  ; ${name...}
+          "\\|[0-9]"                ; $0 .. $9
+          "\\|{[0-9]+[^}]*}"       ; ${12...}
+          "\\)")
+  "Regex matching YSH variable substitutions.")
+
+(defun ysh--match-var-sub (limit)
+  "Font-lock matcher for variable substitutions up to LIMIT.
+Matches $name, ${name}, $0, ${11} etc. but skips matches that:
+ - are inside single-quoted strings (where $ is literal)
+ - are preceded by backslash (\\$name is escaped)"
+  (let ((found nil))
+    (while (and (not found)
+                (re-search-forward ysh--var-sub-re limit t))
+      (let* ((beg (match-beginning 0))
+             (ppss (save-excursion (syntax-ppss beg)))
+             (in-string (nth 3 ppss))
+             (prev-char (and (> beg 1) (char-before beg))))
+        (cond
+         ;; Skip if preceded by backslash (escaped)
+         ((eql prev-char ?\\) nil)
+         ;; Skip if inside a comment
+         ((nth 4 ppss) nil)
+         ;; Inside a string: only match in double-quoted ("), not single (')
+         (in-string
+          (when (eql in-string ?\")
+            (setq found t)))
+         ;; Not in a string: always match
+         (t (setq found t)))))
+    found))
+
 ;; ---------------------------------------------------------------------
 ;; Font-lock keywords
 ;; ---------------------------------------------------------------------
@@ -114,21 +196,19 @@
       (,(concat first "\\(=\\)\\s-") 1 font-lock-keyword-face)
 
       ;; ----- Shell / YSH keywords (from lib-command-expr-dq.vim) -----
-      (,(concat "\\<"
+      ;; Anchored to first-word position so "echo for" does NOT highlight "for".
+      (,(concat first
                 (regexp-opt
                  '("if" "elif" "else" "case" "while" "for" "in" "time"
                    "break" "continue" "return")
                  t)
                 "\\>")
-       . font-lock-keyword-face)
+       1 font-lock-keyword-face)
 
       ;; ----- Expression keywords (contained in expr contexts) -----
-      (,(concat "\\<"
-                (regexp-opt
-                 '("and" "or" "not" "is" "as" "capture")
-                 t)
-                "\\>")
-       . font-lock-keyword-face)
+      ;; These only apply in expression context (after var/const/setvar/etc).
+      ;; Matcher function checks context to avoid "echo and" false positives.
+      (ysh--match-expr-keyword 0 font-lock-keyword-face)
 
       ;; ----- Builtin procs / commands -----
       (,(concat first
@@ -147,17 +227,19 @@
                 "\\>")
        1 font-lock-builtin-face)
 
-      ;; ----- Expression atoms (from lib-details.vim) -----
-      ;; null true false
-      ("\\<\\(null\\|true\\|false\\)\\>" . font-lock-constant-face)
-      ;; Numeric literals
-      ("\\<[0-9]+\\(?:\\.[0-9]+\\)?\\(?:[eE][-+]?[0-9]+\\)?\\>" . font-lock-constant-face)
-      ;; 0x hex literals
-      ("\\<0[xX][0-9a-fA-F]+\\>" . font-lock-constant-face)
-
       ;; ----- Backslash-quoted chars (from stage3.vim) -----
       ;; \# \' \" \$ \@ \( \) \{ \} \\ \[ \]
-      ("\\\\[#'\"$@(){}\\\\\\[\\]]" . 'ysh-backslash-face)
+      ;; MUST come before var-sub rules so \$ gets backslash-face.
+      ;; Note: ] must be first in the character class (Emacs 31 bug with \]).
+      ("\\\\[]#'\"$@(){}\\\\[]" 0 'ysh-backslash-face t)
+
+      ;; ----- Variable substitutions (from lib-details.vim) -----
+      ;; MUST come before numeric literals so $0 beats plain 0.
+      ;; Override t: apply inside double-quoted strings (overrides string-face).
+      ;; The matcher function skips single-quoted string contexts.
+      (ysh--match-var-sub 0 'ysh-var-sub-face t)
+      ;; @splice  (at start of line or after whitespace)
+      (,(concat "\\(?:^\\|\\s-\\)\\(@" ysh--var-name-re "\\)") 1 'ysh-var-sub-face)
 
       ;; ----- Sigil pairs: delimiters (from lib-command-expr-dq.vim) -----
       ;; $( $[ @( @[ ^( ^[  and their closing counterparts
@@ -165,17 +247,13 @@
       ;; :| array literal opener
       ("\\(:|\\)" 1 'ysh-sigil-pair-face)
 
-      ;; ----- Variable substitutions (from lib-details.vim) -----
-      ;; $name
-      (,(concat "\\$" ysh--var-name-re) . 'ysh-var-sub-face)
-      ;; ${name ...}
-      (,(concat "\\${" ysh--var-name-re "[^}]*}") . 'ysh-var-sub-face)
-      ;; $0 .. $9
-      ("\\$[0-9]" . 'ysh-var-sub-face)
-      ;; ${12 ...}
-      ("\\${[0-9]+[^}]*}" . 'ysh-var-sub-face)
-      ;; @splice  (at start of line or after whitespace)
-      (,(concat "\\(?:^\\|\\s-\\)\\(@" ysh--var-name-re "\\)") 1 'ysh-var-sub-face)
+      ;; ----- Expression atoms (from lib-details.vim) -----
+      ;; null true false
+      ("\\<\\(null\\|true\\|false\\)\\>" . font-lock-constant-face)
+      ;; Numeric literals
+      ("\\<[0-9]+\\(?:\\.[0-9]+\\)?\\(?:[eE][-+]?[0-9]+\\)?\\>" . font-lock-constant-face)
+      ;; 0x hex literals
+      ("\\<0[xX][0-9a-fA-F]+\\>" . font-lock-constant-face)
 
       ;; ----- Special variables -----
       ("\\<\\(ARGV\\|ARGS\\|ENV\\|_reply\\|_status\\|_error\\)\\>" . font-lock-variable-name-face)
@@ -197,12 +275,16 @@
 
 (defvar ysh-mode-syntax-table
   (let ((st (make-syntax-table)))
-    ;; # starts a comment to end of line
-    (modify-syntax-entry ?# "<" st)
+    ;; # is punctuation by default; syntax-propertize promotes it to
+    ;; comment-starter only when preceded by whitespace/metacharacters/BOL.
+    ;; This prevents mid-word # (echo not#comment) from starting comments.
+    (modify-syntax-entry ?# "." st)
     (modify-syntax-entry ?\n ">" st)
 
-    ;; Double-quoted strings
-    (modify-syntax-entry ?\" "\"" st)
+    ;; Double-quote — treated as punctuation by default; string parsing is
+    ;; handled by syntax-propertize-function to support nested double quotes
+    ;; inside $[...] expression subs (the canonical Stage 2 problem).
+    (modify-syntax-entry ?\" "." st)
 
     ;; Single quote — treated as punctuation; string parsing is handled
     ;; by syntax-propertize-function to avoid triple-quote confusion.
@@ -244,45 +326,103 @@ This ensures triple-quoted string openers are included in the region."
           (when (and string-start (< string-start start))
             (cons string-start end)))))))
 
+(defun ysh--scan-dq-content (bound)
+  "Scan forward through double-quoted string content up to BOUND.
+Point should be just after the opening \".  This function handles:
+ - Backslash escapes (\\x)
+ - $[...] expression subs (with recursive DQ string support)
+ - Closing \" (marked with string syntax)
+Leaves point after the closing \"."
+  (while (< (point) bound)
+    (let ((ch (char-after)))
+      (cond
+       ;; Closing "
+       ((eql ch ?\")
+        (put-text-property (point) (1+ (point))
+                           'syntax-table (string-to-syntax "\""))
+        (forward-char 1)
+        (setq bound 0))  ; exit loop
+       ;; Backslash escape — skip \x
+       ((and (eql ch ?\\) (< (1+ (point)) bound))
+        (forward-char 2))
+       ;; $[ — expression sub: scan for matching ], handling nested strings
+       ((and (eql ch ?$)
+             (< (1+ (point)) bound)
+             (eql (char-after (1+ (point))) ?\[))
+        (forward-char 2)  ; skip $[
+        (ysh--scan-expr-sub bound))
+       ;; Anything else — advance
+       (t (forward-char 1))))))
+
+(defun ysh--scan-expr-sub (bound)
+  "Scan forward through a $[...] expression sub up to BOUND.
+Point should be just after the opening $[.  Tracks bracket depth and
+skips over nested strings WITHOUT marking them — the outer DQ string's
+delimiters already span the whole range, so inner content just gets
+string-face from the enclosing string."
+  (let ((depth 1))
+    (while (and (> depth 0) (< (point) bound))
+      (let ((ch (char-after)))
+        (cond
+         ;; Nested [ increases depth
+         ((eql ch ?\[) (setq depth (1+ depth)) (forward-char 1))
+         ;; ] decreases depth
+         ((eql ch ?\]) (setq depth (1- depth)) (forward-char 1))
+         ;; " inside expr sub — skip over the inner string WITHOUT marking.
+         ;; The inner " stays as punctuation; the outer string covers it.
+         ((eql ch ?\")
+          (forward-char 1)  ; skip opening "
+          (while (and (< (point) bound)
+                      (not (eql (char-after) ?\")))
+            (when (eql (char-after) ?\\)
+              (forward-char 1))  ; skip escape
+            (forward-char 1))
+          (when (< (point) bound) (forward-char 1)))  ; skip closing "
+         ;; ' inside expr sub — skip single-quoted string
+         ((eql ch ?\')
+          (forward-char 1)
+          (while (and (< (point) bound) (not (eql (char-after) ?\')))
+            (forward-char 1))
+          (when (< (point) bound) (forward-char 1)))
+         ;; Anything else
+         (t (forward-char 1)))))))
+
 (defun ysh--syntax-propertize (start end)
   "Apply syntax properties for YSH string forms between START and END.
-Handles:
- - Triple-quoted single strings: \\='''...\\='''  (with optional r/b/u prefix)
- - Triple-quoted double strings: \\=\"\\=\"\\=\"...\\=\"\\=\"\\=\"  (with optional $ prefix)
- - Regular single-quoted strings: \\='...\\='  (with optional r/b/u prefix)
- - Dollar double-quoted strings: $\\=\"...\\=\"
+Handles (in order):
+ 1. Triple-quoted single strings: [rbu]?\\='''...\\='''
+ 2. Triple-quoted double strings: $?\\=\"\\=\"\\=\"...\\=\"\\=\"\\=\"
+ 3. J8 single-quoted strings: [bu]\\='...\\='  (backslash escapes)
+ 4. Raw single-quoted strings: r\\='...\\='  (no escapes)
+ 5. Plain single-quoted strings: \\='...\\='  (no escapes)
+ 6. Dollar double-quoted strings: $\\=\"...\\=\"
+ 7. Comment markers: # preceded by whitespace/metacharacters/BOL
 
-Closing delimiters for triple-quoted strings are searched up to `point-max'
-so that JIT-lock sub-region boundaries do not prevent finding the closer."
+Triple-quoted closers are searched up to `point-max' so that
+JIT-lock sub-region boundaries do not prevent finding them."
+
+  ;; --- 1. Triple-single-quoted: [rbu]?''' ... ''' ---
   (goto-char start)
-  ;; Triple-single-quoted: [rbu]?''' ... '''
-  ;; Must come before regular single-quoted to win the match.
   (while (re-search-forward "\\(?:[rbu]\\)?\\('''\\)" end t)
     (let ((open-start (match-beginning 1)))
       (unless (nth 8 (save-excursion (syntax-ppss open-start)))
-        ;; Mark first quote as generic string opener
         (put-text-property open-start (1+ open-start)
                            'syntax-table (string-to-syntax "|"))
-        ;; Mark the middle two quotes as punctuation (inert)
         (put-text-property (1+ open-start) (+ open-start 2)
                            'syntax-table (string-to-syntax "."))
         (put-text-property (+ open-start 2) (+ open-start 3)
                            'syntax-table (string-to-syntax "."))
-        ;; Find closing ''' — search to end of buffer, not just END,
-        ;; because the closer may be far beyond the propertize region.
         (when (re-search-forward "'''" (point-max) t)
           (let ((close-end (point)))
-            ;; Mark first two closing quotes as punctuation
             (put-text-property (- close-end 3) (- close-end 2)
                                'syntax-table (string-to-syntax "."))
             (put-text-property (- close-end 2) (- close-end 1)
                                'syntax-table (string-to-syntax "."))
-            ;; Mark last quote as generic string closer
             (put-text-property (- close-end 1) close-end
                                'syntax-table (string-to-syntax "|")))))))
 
+  ;; --- 2. Triple-double-quoted: $?""" ... """ ---
   (goto-char start)
-  ;; Triple-double-quoted: $?""" ... """
   (while (re-search-forward "\\(?:\\$\\)?\\(\"\"\"\\)" end t)
     (let ((open-start (match-beginning 1)))
       (unless (nth 8 (save-excursion (syntax-ppss open-start)))
@@ -292,7 +432,6 @@ so that JIT-lock sub-region boundaries do not prevent finding the closer."
                            'syntax-table (string-to-syntax "."))
         (put-text-property (+ open-start 2) (+ open-start 3)
                            'syntax-table (string-to-syntax "."))
-        ;; Search to end of buffer for closing """
         (when (re-search-forward "\"\"\"" (point-max) t)
           (let ((close-end (point)))
             (put-text-property (- close-end 3) (- close-end 2)
@@ -302,24 +441,99 @@ so that JIT-lock sub-region boundaries do not prevent finding the closer."
             (put-text-property (- close-end 1) close-end
                                'syntax-table (string-to-syntax "|")))))))
 
+  ;; --- 3. J8 single-quoted: [bu]'...' (backslash escapes active) ---
+  ;; Use string-quote syntax (") so that \ escapes work — b'\'' is valid.
+  ;; Scan forward manually since the escape-aware regex is fragile.
   (goto-char start)
-  ;; Regular single-quoted: [rbu]?'...' (single line, non-triple)
-  ;; Negative lookahead for triple: match ' not followed by ''
-  (while (re-search-forward "\\(?:\\<[rbu]\\)?\\('\\)\\(?:''\\)\\@![^'\n]*\\('\\)" end t)
+  (while (re-search-forward "\\<[bu]\\('\\)" end t)
+    (let ((open-pos (match-beginning 1)))
+      (unless (or (get-text-property open-pos 'syntax-table)
+                  (nth 8 (save-excursion (syntax-ppss open-pos))))
+        ;; Mark opener with string-quote syntax (interacts with \ escape)
+        (put-text-property open-pos (1+ open-pos)
+                           'syntax-table (string-to-syntax "\""))
+        ;; Scan for closing ' — skip \. pairs
+        (let ((found nil))
+          (while (and (not found) (< (point) (point-max))
+                      (not (eql (char-after) ?\n)))
+            (cond
+             ((and (eql (char-after) ?\\) (< (1+ (point)) (point-max)))
+              (forward-char 2))  ; skip \x
+             ((eql (char-after) ?\')
+              (put-text-property (point) (1+ (point))
+                                 'syntax-table (string-to-syntax "\""))
+              (forward-char 1)
+              (setq found t))
+             (t (forward-char 1))))))))
+
+  ;; --- 4. Raw single-quoted: r'...' (no escapes, \ is literal) ---
+  ;; Use string-quote syntax (") but disable \ escaping inside.
+  (goto-char start)
+  (while (re-search-forward "\\<r\\('\\)\\([^'\n]*\\)\\('\\)" end t)
+    (let ((open-pos (match-beginning 1))
+          (content-beg (match-beginning 2))
+          (content-end (match-end 2))
+          (close-pos (match-beginning 3)))
+      (unless (or (get-text-property open-pos 'syntax-table)
+                  (nth 8 (save-excursion (syntax-ppss open-pos))))
+        (put-text-property open-pos (1+ open-pos)
+                           'syntax-table (string-to-syntax "\""))
+        (put-text-property close-pos (1+ close-pos)
+                           'syntax-table (string-to-syntax "\""))
+        ;; Mark all \ inside as punctuation to prevent escape behavior
+        (save-excursion
+          (goto-char content-beg)
+          (while (search-forward "\\" content-end t)
+            (put-text-property (1- (point)) (point)
+                               'syntax-table (string-to-syntax ".")))))))
+
+  ;; --- 5. Plain single-quoted: '...' (no escapes, \ is literal) ---
+  ;; Use string-quote syntax (") but disable \ escaping inside.
+  ;; Skip positions already propertized by earlier passes (triple-quotes).
+  (goto-char start)
+  (while (re-search-forward "\\('\\)\\([^'\n]*\\)\\('\\)" end t)
+    (let ((open-pos (match-beginning 1))
+          (content-beg (match-beginning 2))
+          (content-end (match-end 2))
+          (close-pos (match-beginning 3)))
+      (unless (or (get-text-property open-pos 'syntax-table)
+                  (nth 8 (save-excursion (syntax-ppss open-pos))))
+        (put-text-property open-pos (1+ open-pos)
+                           'syntax-table (string-to-syntax "\""))
+        (put-text-property close-pos (1+ close-pos)
+                           'syntax-table (string-to-syntax "\""))
+        ;; Mark all \ inside as punctuation to prevent escape behavior
+        (save-excursion
+          (goto-char content-beg)
+          (while (search-forward "\\" content-end t)
+            (put-text-property (1- (point)) (point)
+                               'syntax-table (string-to-syntax ".")))))))
+
+  ;; --- 6. Double-quoted strings: "..." and $"..." ---
+  ;; Handles nested double quotes inside $[...] expression subs.
+  ;; The syntax table marks " as punctuation; we handle all DQ strings here.
+  ;; This is the core of Stage 2: recursive sublanguages.
+  (goto-char start)
+  (while (re-search-forward "\\$?\"" end t)
+    (let ((open-pos (match-beginning 0))
+          ;; For $"...", the " is one char after the $
+          (quote-pos (1- (point))))
+      (unless (or (get-text-property quote-pos 'syntax-table)
+                  (nth 8 (save-excursion (syntax-ppss open-pos))))
+        ;; Mark opening " with string syntax
+        (put-text-property quote-pos (1+ quote-pos)
+                           'syntax-table (string-to-syntax "\""))
+        ;; Scan forward through DQ string content
+        (ysh--scan-dq-content (point-max)))))
+
+  ;; --- 7. Comment markers ---
+  ;; # starts a comment only at BOL or after whitespace/metacharacters.
+  ;; The syntax table defaults # to punctuation; we promote it here.
+  (goto-char start)
+  (while (re-search-forward "\\(?:^\\|[ \t;|&]\\)\\(#\\)" end t)
     (unless (nth 8 (save-excursion (syntax-ppss (match-beginning 1))))
       (put-text-property (match-beginning 1) (match-end 1)
-                         'syntax-table (string-to-syntax "\""))
-      (put-text-property (match-beginning 2) (match-end 2)
-                         'syntax-table (string-to-syntax "\""))))
-
-  (goto-char start)
-  ;; Dollar double-quoted: $"..."
-  (while (re-search-forward "\\$\\(\"\\)\\(?:[^\"\\]\\|\\\\.\\)*\\(\"\\)" end t)
-    (unless (nth 8 (save-excursion (syntax-ppss (match-beginning 0))))
-      (put-text-property (match-beginning 1) (match-end 1)
-                         'syntax-table (string-to-syntax "\""))
-      (put-text-property (match-beginning 2) (match-end 2)
-                         'syntax-table (string-to-syntax "\"")))))
+                         'syntax-table (string-to-syntax "<")))))
 
 ;; ---------------------------------------------------------------------
 ;; Indentation (simple heuristic)

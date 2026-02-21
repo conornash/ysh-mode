@@ -1,0 +1,119 @@
+# Multi-line
+
+# I guess the \ can be highlighted
+
+echo \
+    multi- \
+    line # shell style
+
+... echo
+      multi-
+      line
+    | cat
+    | sort
+    ;  # YSH style
+
+echo \{ \}
+
+# Expression keywords
+
+= 42 if true else 41
+
+var a = [3, 4, 5]
+
+#= [x+1 for x in a if x % 2 === 0]
+
+var mydict = {}
+if ('key' not in mydict) { 
+  echo nope
+}
+
+if (true and false or null) {
+  echo nope
+}
+
+= {} is {} 
+
+
+# = proc
+# = func
+
+# Expression constants
+
+= 3.14
+= 3.14e-5
+
+= /d+ '.' [a-z A-Z 0-9 '-']+/
+
+= /<capture d d as month> '-' <capture d d as day>/
+
+# Redirects
+
+echo stdout > /dev/null
+echo stderr 2> /dev/null
+
+redir {out}> /tmp/out.txt {
+  for i in 55 66 77 {
+    echo $i >& $out
+  }
+}
+
+tac /tmp/out.txt
+
+
+# Word Sequence
+
+echo *.py
+
+echo {a,b}@example.com
+
+echo {0..4}-{a,b}
+
+
+# Word Language
+
+echo ~/src
+
+echo ~root/src
+
+
+# Builtin procs
+
+pushd /tmp
+popd
+
+
+# J8 strings
+
+echo u'newline \n backslash \\ double \" single \' tab \t other'
+echo b'byte \yff what'
+echo b'mu = \u{3bc}'
+
+echo '''
+  mu = \u{3bc}
+  '''
+
+echo u'''
+  mu = \u{3bc}
+  '''
+
+var b = b'''
+  mu = \u{3bc}
+  '''
+
+# echo b'\u{badG}'
+# echo b'\y BAD'
+# echo b'\yGG BAD'
+# echo b'\m BAD'
+
+
+FOO=bar env -i echo
+
+FOO=bar SPAM_EGGS='baz' env -i echo
+
+# Invalid env name
+# FOO=bar SPAM-EGGS='baz' env -i echo
+
+var argv_array = :| echo hi |
+@argv_array bye
+echo @argv_array bye

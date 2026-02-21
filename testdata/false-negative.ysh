@@ -1,0 +1,23 @@
+
+echo yes # comment
+
+# should be highlighted, but isn't
+echo yes;#comment
+
+
+var s='s'
+
+# bug FIXED
+var i =len(s)
+var i= len(s)
+
+call len(s)
+
+# these are OK
+pp [ s ]
+pp ( s )
+
+# bug FIXED
+setvar i += len(s)
+setvar i -= len(s)
+
