@@ -1,0 +1,67 @@
+# Command Keywords
+
+# Should disallow the command keywords in YSH expressions?
+
+# Or the syntax highlighter can match beginning of line
+
+var const = 42
+setvar const = const + 1
+echo $const
+
+var setvar = 42
+setvar setvar = setvar + 1
+echo $setvar
+
+var call  = 42
+setvar call = call + 1
+echo $call
+
+echo calling  # should not match
+
+#
+# These should still be highlighted
+#
+
+echo hi;call 42
+echo hi; call 42
+echo hi;var x =42
+echo hi;  var x =42
+echo
+
+# hard one
+echo pipeline | proc p { echo pipeline }; p | cat
+
+## && ||
+echo hi && var x = 42
+echo hi && call 42
+
+false || var x = 42
+false || call (42)
+
+# Odd but valid?
+true | var x = 42
+true | call (42)
+
+# first word can come after:
+# ; |
+# ;;
+# && ||
+
+#
+# Bugs fixed
+#
+
+proc p (...args; x) {
+  json write (args)
+}
+
+p proc a b c (42)
+p func x y z (42)
+
+p var x = (42)
+p setvar x = (42)
+p setglobal a[i] = (42)
+
+p call (42)
+
+echo notbare = 42
