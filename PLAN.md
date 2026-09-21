@@ -199,3 +199,56 @@ ysh-mode/
 | Stage 3 (mode details) | 18 | 18 | 0 | ✅ Complete |
 | Integration | 4 | 4 | 0 | ✅ Complete |
 | **Total** | **74** | **74** | **0** | **✅ ALL GREEN** |
+
+(The suite has since grown to 153 tests; 22 of them are deliberately red
+Stage 2/3 bugs from commit 2907a37.)
+
+## Bug: quote-parity desync (fixed)
+
+Reported against `pat-postgres-ssl/scripts/migrate/lib.ysh`:
+
+```ysh
+var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']
+```
+
+Everything after this line highlighted as one single-quoted string.
+
+Cause: `syntax-propertize` ran one independent pass per string form, in
+the order triple → J8 → raw → plain. The J8 pass searched `\<[bu]'`
+with `case-fold-search` inherited as `t`, so it matched the **closing**
+quote of `'B'` (a one-character string whose body happens to be a
+prefix letter) and opened a string there. Parity from that point on was
+off by one, leaving a string opener with no closer at end of line —
+hence "the rest of the file is a string". `['b', 'c']` and `['r', 'x']`
+failed the same way even with case folding off.
+
+Fix:
+
+- `ysh--propertize-single-quotes` replaces the four separate passes with
+  one left-to-right scan. After a string is propertized, point sits past
+  its closing quote, so a closer can never be re-read as an opener.
+- `case-fold-search` is bound to nil for the whole propertize function;
+  YSH prefixes are lowercase.
+- Unterminated openers (`echo b'unclosed`) stay punctuation instead of
+  opening a string that swallows the buffer.
+- `ysh--escaped-p` keeps `echo \'single \'single` and `echo \"double`
+  from opening strings (this was leaking in `testdata/minimal.ysh` and
+  `testdata/recursive-modes.ysh`).
+- The `"""` and `"` loops got a `(< (point) end)` guard: their closer
+  searches run to `point-max`, and `re-search-forward` signals "Invalid
+  search bound" once point is past `end`. This crashed on chunked
+  (JIT-lock-sized) fontification of `testdata/minimal.ysh`.
+- The redundant `b'…'`/`r'…'` font-lock keyword rules are gone (syntax
+  propertization already paints those bodies, and the rules re-matched
+  `['b', 'c']` with override `t`). Backslash-quoted chars moved to
+  `ysh--match-backslash`, which skips single-quoted strings.
+
+## Known remaining defects
+
+- Comments are propertized **after** strings, so `#  ''' r'''` in
+  `testdata/minimal.ysh` opens a triple-quoted string from inside a
+  comment. Correct handling needs comments and strings in the same
+  single scan (the real "coarse parsing with a context stack" shape).
+- Fontification of multi-line triple-quoted strings is chunk-dependent:
+  fontifying `minimal.ysh` in 137-char chunks differs from a whole-buffer
+  pass at 81 positions (`recursive-modes.ysh`: 4).

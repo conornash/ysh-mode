@@ -195,6 +195,60 @@ From stage1.md: 'Make sure that b\\'\\'' is handled.'"
     (should-not (ysh-test--has-face text 13 'font-lock-string-face))))
 
 ;; ---------------------------------------------------------------------
+;; 1.4b Single-character strings that look like J8/raw prefixes
+;; ---------------------------------------------------------------------
+;; A closing ' must never be mistaken for the opening ' of a b''/u''/r''
+;; string.  In ['B', 'KiB'] the B is a one-character string body, not the
+;; J8 prefix of the quote that follows it.  Getting this wrong desyncs
+;; quote parity and paints the rest of the file as string.
+
+(ert-deftest ysh-stage1/sq-single-char-b-body ()
+  "['b', 'c'] — the b is string content, not a J8 prefix."
+  (let ((text "var u = ['b', 'c']\nvar after = 1\n"))
+    ;; The , between the two strings is not inside a string
+    (should-not (ysh-test--has-face text 13 'font-lock-string-face))
+    ;; The next line is code, not string
+    (should-not (ysh-test--has-face text 20 'font-lock-string-face))))
+
+(ert-deftest ysh-stage1/sq-single-char-b-body-uppercase ()
+  "['B', 'KiB', 'MiB'] — uppercase B is not a J8 prefix either.
+From pat-postgres-ssl/scripts/migrate/lib.ysh: var units = ['B', 'KiB', ...]"
+  (let ((text "var units = ['B', 'KiB', 'MiB']\nvar after = 1\n"))
+    (should (ysh-test--has-face text 15 'font-lock-string-face))   ; B
+    (should (ysh-test--has-face text 21 'font-lock-string-face))   ; KiB
+    (should (ysh-test--has-face text 28 'font-lock-string-face))   ; MiB
+    (should-not (ysh-test--has-face text 18 'font-lock-string-face)) ; between
+    (should-not (ysh-test--has-face text 34 'font-lock-string-face)) ; next line
+    (should-not (ysh-test--has-face text 40 'font-lock-string-face))))
+
+(ert-deftest ysh-stage1/sq-single-char-r-body ()
+  "['r', 'x'] — the r is string content, not a raw-string prefix."
+  (let ((text "var u = ['r', 'x']\nvar after = 1\n"))
+    (should-not (ysh-test--has-face text 13 'font-lock-string-face))
+    (should-not (ysh-test--has-face text 20 'font-lock-string-face))))
+
+(ert-deftest ysh-stage1/sq-single-char-words ()
+  "echo 'b' 'c' — two adjacent one-character strings in command position."
+  (let ((text "echo 'b' 'c'\nvar after = 1\n"))
+    (should-not (ysh-test--has-face text 9 'font-lock-string-face))
+    (should-not (ysh-test--has-face text 14 'font-lock-string-face))))
+
+(ert-deftest ysh-stage1/escaped-quotes-do-not-open-strings ()
+  "echo \\='single \\='single \\=\"double \\=\"double \u2014 quoted quotes open nothing.
+From testdata/minimal.ysh.  An escaped quote that was read as a string
+opener left the rest of the buffer string-faced."
+  (let ((text "echo \\'single \\'single \\\"double \\\"double\necho after\n"))
+    (should-not (ysh-test--has-face text 17 'font-lock-string-face))  ; 2nd single
+    (should-not (ysh-test--has-face text 26 'font-lock-string-face))  ; 1st double
+    (should-not (ysh-test--has-face text 40 'font-lock-string-face))  ; last word
+    (should (ysh-test--has-face text 42 'font-lock-builtin-face))))   ; next line
+
+(ert-deftest ysh-stage1/unclosed-j8-does-not-leak ()
+  "An unterminated b' must not paint the rest of the file as string."
+  (let ((text "echo b'unclosed\nvar after = 1\n"))
+    (should-not (ysh-test--has-face text 20 'font-lock-string-face))))
+
+;; ---------------------------------------------------------------------
 ;; 1.5 Double-quoted strings
 ;; ---------------------------------------------------------------------
 

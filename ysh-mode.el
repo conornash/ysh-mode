@@ -166,6 +166,27 @@ Matches $name, ${name}, $0, ${11} etc. but skips matches that:
          (t (setq found t)))))
     found))
 
+(defconst ysh--backslash-re "\\\\[]#'\"$@(){}\\\\[]"
+  "Regexp for a backslash-quoted character.
+Note: `]' must come first in the character class \(Emacs 31 mishandles
+\\] inside a class\).")
+
+(defun ysh--match-backslash (limit)
+  "Font-lock matcher for backslash-quoted characters up to LIMIT.
+Skips matches inside single-quoted strings, where a backslash is a
+literal character \(r\\='C:\\\\=' and \\='a\\\\b\\=' contain no escapes\), and
+inside comments.  J8 strings keep their escape highlighting: the
+`ysh-j8-escape-face' rules run later and override."
+  (let ((found nil))
+    (while (and (not found)
+                (re-search-forward ysh--backslash-re limit t))
+      (let* ((beg (match-beginning 0))
+             (ppss (save-excursion (syntax-ppss beg))))
+        (unless (or (nth 4 ppss)
+                    (eql (nth 3 ppss) ?\'))
+          (setq found t))))
+    found))
+
 ;; ---------------------------------------------------------------------
 ;; Font-lock keywords
 ;; ---------------------------------------------------------------------
@@ -230,8 +251,9 @@ Matches $name, ${name}, $0, ${11} etc. but skips matches that:
       ;; ----- Backslash-quoted chars (from stage3.vim) -----
       ;; \# \' \" \$ \@ \( \) \{ \} \\ \[ \]
       ;; MUST come before var-sub rules so \$ gets backslash-face.
-      ;; Note: ] must be first in the character class (Emacs 31 bug with \]).
-      ("\\\\[]#'\"$@(){}\\\\[]" 0 'ysh-backslash-face t)
+      ;; Matcher function (not a bare regexp) so that backslashes inside
+      ;; single-quoted strings stay string-faced.
+      (ysh--match-backslash 0 'ysh-backslash-face t)
 
       ;; ----- Variable substitutions (from lib-details.vim) -----
       ;; MUST come before numeric literals so $0 beats plain 0.
@@ -387,43 +409,139 @@ string-face from the enclosing string."
          ;; Anything else
          (t (forward-char 1)))))))
 
+(defun ysh--escaped-p (pos)
+  "Return non-nil if the character at POS is backslash-escaped.
+An odd number of backslashes immediately before POS escapes it, so in
+command mode \\=\\=' is a quoted quote, while \\=\\\\=' is a literal backslash
+followed by a string opener."
+  (let ((n 0)
+        (p pos))
+    (while (and (> p (point-min))
+                (eql (char-before p) ?\\))
+      (setq n (1+ n))
+      (setq p (1- p)))
+    (= 1 (mod n 2))))
+
+(defun ysh--sq-closer-escaped (limit)
+  "Return the position of the closing \\=' of a J8 string, or nil.
+Scanning starts at point, which must be just after the opening \\='.
+Backslash escapes (\\x) are skipped, so b\\='\\\\=''\\=' does not close early.
+A newline or LIMIT ends the search unterminated.  Point is not moved."
+  (save-excursion
+    (catch 'ysh--closer
+      (while (< (point) limit)
+        (let ((ch (char-after)))
+          (cond
+           ((eql ch ?\n) (throw 'ysh--closer nil))
+           ((and (eql ch ?\\) (< (1+ (point)) limit)) (forward-char 2))
+           ((eql ch ?\') (throw 'ysh--closer (point)))
+           (t (forward-char 1)))))
+      nil)))
+
+(defun ysh--sq-closer-raw (limit)
+  "Return the position of the closing \\=' of a raw/plain string, or nil.
+Scanning starts at point, which must be just after the opening \\='.
+Backslashes are literal \(r\\='C:\\\\=' is a complete string\), so the very
+next \\=' on the line closes it.  Point is not moved."
+  (save-excursion
+    (let ((stop (min limit (line-end-position))))
+      (when (search-forward "'" stop t)
+        (1- (point))))))
+
+(defun ysh--propertize-single-quotes (start end)
+  "Propertize every single-quoted YSH string form between START and END.
+Handles, in one left-to-right scan:
+  [rbu]?\\='''...\\='''   triple-quoted (may span lines)
+  [bu]\\='...\\='         J8, backslash escapes active
+  r\\='...\\='            raw, backslashes literal
+  \\='...\\='             plain, backslashes literal
+
+The single scan is the point: after a string is propertized, point is
+left past its closing \\=', so a closing quote can never be re-examined as
+an opener.  Separate per-form passes got this wrong \(\[\\='B\\=', \\='KiB\\='] read the
+B as a J8 prefix on the quote that closed \\='B\\='\), which desynced quote
+parity for the rest of the buffer.
+
+Unterminated openers are left as punctuation rather than opening a
+string that would swallow the rest of the buffer."
+  (goto-char start)
+  (while (and (< (point) end)
+              (re-search-forward "\\(?:\\<\\([rbu]\\)\\)?\\('\\)" end t))
+    (let* ((prefix (and (match-beginning 1) (char-after (match-beginning 1))))
+           (qpos (match-beginning 2)))
+      (if (or (get-text-property qpos 'syntax-table)
+              (nth 8 (save-excursion (syntax-ppss qpos)))
+              ;; echo \'single \'single — a quoted quote opens nothing.
+              (ysh--escaped-p qpos))
+          ;; Already claimed, inside an open string, or backslash-quoted.
+          (goto-char (1+ qpos))
+        (if (and (eql (char-after (+ qpos 1)) ?\')
+                 (eql (char-after (+ qpos 2)) ?\'))
+            ;; --- Triple-quoted: fences at the outer quotes, closer may
+            ;; lie beyond END (JIT-lock sub-region), so search to point-max.
+            (progn
+              (put-text-property qpos (1+ qpos)
+                                 'syntax-table (string-to-syntax "|"))
+              (put-text-property (1+ qpos) (+ qpos 2)
+                                 'syntax-table (string-to-syntax "."))
+              (put-text-property (+ qpos 2) (+ qpos 3)
+                                 'syntax-table (string-to-syntax "."))
+              (goto-char (+ qpos 3))
+              (if (re-search-forward "'''" (point-max) t)
+                  (let ((close-end (point)))
+                    (put-text-property (- close-end 3) (- close-end 2)
+                                       'syntax-table (string-to-syntax "."))
+                    (put-text-property (- close-end 2) (- close-end 1)
+                                       'syntax-table (string-to-syntax "."))
+                    (put-text-property (- close-end 1) close-end
+                                       'syntax-table (string-to-syntax "|")))
+                (goto-char (point-max))))
+          ;; --- Single-quoted: b'/u' honour escapes, r'/plain do not.
+          (goto-char (1+ qpos))
+          (let* ((j8 (memq prefix '(?b ?u)))
+                 (closer (if j8
+                             (ysh--sq-closer-escaped (point-max))
+                           (ysh--sq-closer-raw (point-max)))))
+            (when closer
+              (put-text-property qpos (1+ qpos)
+                                 'syntax-table (string-to-syntax "\""))
+              (put-text-property closer (1+ closer)
+                                 'syntax-table (string-to-syntax "\""))
+              ;; Raw and plain strings: neutralize \ so it cannot escape.
+              (unless j8
+                (save-excursion
+                  (while (search-forward "\\" closer t)
+                    (put-text-property (1- (point)) (point)
+                                       'syntax-table (string-to-syntax ".")))))
+              (goto-char (1+ closer)))))))))
+
 (defun ysh--syntax-propertize (start end)
   "Apply syntax properties for YSH string forms between START and END.
 Handles (in order):
- 1. Triple-quoted single strings: [rbu]?\\='''...\\='''
+ 1. All single-quoted forms, in one scan (see
+    `ysh--propertize-single-quotes'): [rbu]?\\='''...\\=''',
+    [bu]\\='...\\=', r\\='...\\=', \\='...\\='
  2. Triple-quoted double strings: $?\\=\"\\=\"\\=\"...\\=\"\\=\"\\=\"
- 3. J8 single-quoted strings: [bu]\\='...\\='  (backslash escapes)
- 4. Raw single-quoted strings: r\\='...\\='  (no escapes)
- 5. Plain single-quoted strings: \\='...\\='  (no escapes)
- 6. Dollar double-quoted strings: $\\=\"...\\=\"
- 7. Comment markers: # preceded by whitespace/metacharacters/BOL
+ 3. Double-quoted strings: \\=\"...\\=\" and $\\=\"...\\=\"
+ 4. Comment markers: # preceded by whitespace/metacharacters/BOL
+
+Searching is case-sensitive: YSH string prefixes are lowercase only, so
+\\=['B'] must not be read as a J8 string.
 
 Triple-quoted closers are searched up to `point-max' so that
 JIT-lock sub-region boundaries do not prevent finding them."
+  (let ((case-fold-search nil))
 
-  ;; --- 1. Triple-single-quoted: [rbu]?''' ... ''' ---
-  (goto-char start)
-  (while (re-search-forward "\\(?:[rbu]\\)?\\('''\\)" end t)
-    (let ((open-start (match-beginning 1)))
-      (unless (nth 8 (save-excursion (syntax-ppss open-start)))
-        (put-text-property open-start (1+ open-start)
-                           'syntax-table (string-to-syntax "|"))
-        (put-text-property (1+ open-start) (+ open-start 2)
-                           'syntax-table (string-to-syntax "."))
-        (put-text-property (+ open-start 2) (+ open-start 3)
-                           'syntax-table (string-to-syntax "."))
-        (when (re-search-forward "'''" (point-max) t)
-          (let ((close-end (point)))
-            (put-text-property (- close-end 3) (- close-end 2)
-                               'syntax-table (string-to-syntax "."))
-            (put-text-property (- close-end 2) (- close-end 1)
-                               'syntax-table (string-to-syntax "."))
-            (put-text-property (- close-end 1) close-end
-                               'syntax-table (string-to-syntax "|")))))))
+  ;; --- 1. All single-quote forms, left to right ---
+  (ysh--propertize-single-quotes start end)
 
   ;; --- 2. Triple-double-quoted: $?""" ... """ ---
+  ;; The (< (point) end) guard matters: the closer search below runs to
+  ;; point-max, so point can end up past END, and `re-search-forward'
+  ;; signals "Invalid search bound" when its bound is behind point.
   (goto-char start)
-  (while (re-search-forward "\\(?:\\$\\)?\\(\"\"\"\\)" end t)
+  (while (and (< (point) end)
+              (re-search-forward "\\(?:\\$\\)?\\(\"\"\"\\)" end t))
     (let ((open-start (match-beginning 1)))
       (unless (nth 8 (save-excursion (syntax-ppss open-start)))
         (put-text-property open-start (1+ open-start)
@@ -441,99 +559,34 @@ JIT-lock sub-region boundaries do not prevent finding them."
             (put-text-property (- close-end 1) close-end
                                'syntax-table (string-to-syntax "|")))))))
 
-  ;; --- 3. J8 single-quoted: [bu]'...' (backslash escapes active) ---
-  ;; Use string-quote syntax (") so that \ escapes work — b'\'' is valid.
-  ;; Scan forward manually since the escape-aware regex is fragile.
-  (goto-char start)
-  (while (re-search-forward "\\<[bu]\\('\\)" end t)
-    (let ((open-pos (match-beginning 1)))
-      (unless (or (get-text-property open-pos 'syntax-table)
-                  (nth 8 (save-excursion (syntax-ppss open-pos))))
-        ;; Mark opener with string-quote syntax (interacts with \ escape)
-        (put-text-property open-pos (1+ open-pos)
-                           'syntax-table (string-to-syntax "\""))
-        ;; Scan for closing ' — skip \. pairs
-        (let ((found nil))
-          (while (and (not found) (< (point) (point-max))
-                      (not (eql (char-after) ?\n)))
-            (cond
-             ((and (eql (char-after) ?\\) (< (1+ (point)) (point-max)))
-              (forward-char 2))  ; skip \x
-             ((eql (char-after) ?\')
-              (put-text-property (point) (1+ (point))
-                                 'syntax-table (string-to-syntax "\""))
-              (forward-char 1)
-              (setq found t))
-             (t (forward-char 1))))))))
-
-  ;; --- 4. Raw single-quoted: r'...' (no escapes, \ is literal) ---
-  ;; Use string-quote syntax (") but disable \ escaping inside.
-  (goto-char start)
-  (while (re-search-forward "\\<r\\('\\)\\([^'\n]*\\)\\('\\)" end t)
-    (let ((open-pos (match-beginning 1))
-          (content-beg (match-beginning 2))
-          (content-end (match-end 2))
-          (close-pos (match-beginning 3)))
-      (unless (or (get-text-property open-pos 'syntax-table)
-                  (nth 8 (save-excursion (syntax-ppss open-pos))))
-        (put-text-property open-pos (1+ open-pos)
-                           'syntax-table (string-to-syntax "\""))
-        (put-text-property close-pos (1+ close-pos)
-                           'syntax-table (string-to-syntax "\""))
-        ;; Mark all \ inside as punctuation to prevent escape behavior
-        (save-excursion
-          (goto-char content-beg)
-          (while (search-forward "\\" content-end t)
-            (put-text-property (1- (point)) (point)
-                               'syntax-table (string-to-syntax ".")))))))
-
-  ;; --- 5. Plain single-quoted: '...' (no escapes, \ is literal) ---
-  ;; Use string-quote syntax (") but disable \ escaping inside.
-  ;; Skip positions already propertized by earlier passes (triple-quotes).
-  (goto-char start)
-  (while (re-search-forward "\\('\\)\\([^'\n]*\\)\\('\\)" end t)
-    (let ((open-pos (match-beginning 1))
-          (content-beg (match-beginning 2))
-          (content-end (match-end 2))
-          (close-pos (match-beginning 3)))
-      (unless (or (get-text-property open-pos 'syntax-table)
-                  (nth 8 (save-excursion (syntax-ppss open-pos))))
-        (put-text-property open-pos (1+ open-pos)
-                           'syntax-table (string-to-syntax "\""))
-        (put-text-property close-pos (1+ close-pos)
-                           'syntax-table (string-to-syntax "\""))
-        ;; Mark all \ inside as punctuation to prevent escape behavior
-        (save-excursion
-          (goto-char content-beg)
-          (while (search-forward "\\" content-end t)
-            (put-text-property (1- (point)) (point)
-                               'syntax-table (string-to-syntax ".")))))))
-
-  ;; --- 6. Double-quoted strings: "..." and $"..." ---
+  ;; --- 3. Double-quoted strings: "..." and $"..." ---
   ;; Handles nested double quotes inside $[...] expression subs.
   ;; The syntax table marks " as punctuation; we handle all DQ strings here.
   ;; This is the core of Stage 2: recursive sublanguages.
   (goto-char start)
-  (while (re-search-forward "\\$?\"" end t)
+  (while (and (< (point) end)
+              (re-search-forward "\\$?\"" end t))
     (let ((open-pos (match-beginning 0))
           ;; For $"...", the " is one char after the $
           (quote-pos (1- (point))))
       (unless (or (get-text-property quote-pos 'syntax-table)
-                  (nth 8 (save-excursion (syntax-ppss open-pos))))
+                  (nth 8 (save-excursion (syntax-ppss open-pos)))
+                  ;; echo \"double — a quoted quote opens nothing.
+                  (ysh--escaped-p quote-pos))
         ;; Mark opening " with string syntax
         (put-text-property quote-pos (1+ quote-pos)
                            'syntax-table (string-to-syntax "\""))
         ;; Scan forward through DQ string content
         (ysh--scan-dq-content (point-max)))))
 
-  ;; --- 7. Comment markers ---
+  ;; --- 4. Comment markers ---
   ;; # starts a comment only at BOL or after whitespace/metacharacters.
   ;; The syntax table defaults # to punctuation; we promote it here.
   (goto-char start)
   (while (re-search-forward "\\(?:^\\|[ \t;|&]\\)\\(#\\)" end t)
     (unless (nth 8 (save-excursion (syntax-ppss (match-beginning 1))))
       (put-text-property (match-beginning 1) (match-end 1)
-                         'syntax-table (string-to-syntax "<")))))
+                         'syntax-table (string-to-syntax "<"))))))
 
 ;; ---------------------------------------------------------------------
 ;; Indentation (simple heuristic)
@@ -615,23 +668,29 @@ JIT-lock sub-region boundaries do not prevent finding them."
     ;; plain """ ... """
     ("[^a-zA-Z0-9_\"]\\(\"\"\"\\(?:.\\|\n\\)*?\"\"\"\\)" 1 font-lock-string-face t)
 
-    ;; ----- J8 / prefix single-line strings -----
-    ;; b'...' u'...'
-    ("\\<[bu]\\('[^'\n]*'\\)" 1 font-lock-string-face t)
-    ;; r'...'
-    ("\\<r\\('[^'\n]*'\\)" 1 font-lock-string-face t)
+    ;; ----- Prefixed single-line strings -----
+    ;; b'...' u'...' r'...' need no keyword rule: `ysh--syntax-propertize'
+    ;; marks their quotes with string syntax, so syntactic fontification
+    ;; already paints the body.  A keyword rule here would re-match
+    ;; ['b', 'c'] as b + "', '" and override the correct faces.
     ;; $"..."
     ("\\$\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)" 1 font-lock-string-face t)
 
     ;; ----- J8 escape sequences inside b'' u'' strings -----
+    ;; The `[^'[:alnum:]_]' prefix guard keeps ['b', 'a\nb'] from reading
+    ;; the one-character string 'b' as a J8 prefix on the next quote.
     ;; Valid JSON escapes: \\ \" \/ \b \f \n \r \t
-    ("\\<[bu]'[^']*\\(\\\\[\\\\\"'/bfnrt]\\)[^']*'" 1 'ysh-j8-escape-face t)
+    ("\\(?:^\\|[^'[:alnum:]_]\\)[bu]'[^']*\\(\\\\[\\\\\"'/bfnrt]\\)[^']*'"
+     1 'ysh-j8-escape-face t)
     ;; \' in J8 strings
-    ("\\<[bu]'[^']*\\(\\\\[']\\)[^']*'" 1 'ysh-j8-escape-face t)
+    ("\\(?:^\\|[^'[:alnum:]_]\\)[bu]'[^']*\\(\\\\[']\\)[^']*'"
+     1 'ysh-j8-escape-face t)
     ;; \yHH hex bytes
-    ("\\<[bu]'[^']*\\(\\\\y[0-9a-fA-F]\\{2\\}\\)[^']*'" 1 'ysh-j8-escape-face t)
+    ("\\(?:^\\|[^'[:alnum:]_]\\)[bu]'[^']*\\(\\\\y[0-9a-fA-F]\\{2\\}\\)[^']*'"
+     1 'ysh-j8-escape-face t)
     ;; \u{HHHHHH} or \U{HHHHHH}
-    ("\\<[bu]'[^']*\\(\\\\[uU]{[0-9a-fA-F]\\{1,6\\}}\\)[^']*'" 1 'ysh-j8-escape-face t)
+    ("\\(?:^\\|[^'[:alnum:]_]\\)[bu]'[^']*\\(\\\\[uU]{[0-9a-fA-F]\\{1,6\\}}\\)[^']*'"
+     1 'ysh-j8-escape-face t)
     )
   "Font-lock rules for YSH string literals.")
 
