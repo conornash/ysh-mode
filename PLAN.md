@@ -169,6 +169,25 @@ Fixed three categories of font-lock keyword issues:
 - [ ] Share infrastructure via `ysh-base-mode` (faces, indent, nav) — future
 - [ ] Upstream grammar has parse errors on 3/6 testdata files (not our bug)
 
+### Phase 6: Jump to definition (xref) ✅
+
+**Status: COMPLETE** (21 `ysh-xref/*` tests green)
+
+- [x] Built-in xref backend (`ysh-xref-backend`) in `ysh-mode.el`, also
+      enabled in `ysh-ts-mode` — no language server / Eglot needed
+- [x] Definitions: proc, func, `name() {}`, var/const (multi-name),
+      parameters, for-loop vars, `use` module names
+- [x] Scope-aware lookup: enclosing proc/func locals → buffer top level
+      → `source` (transitive) / `use --pick` → plain `use` modules →
+      rest of buffer → project `.ysh` files
+- [x] `mod my-proc` / `mod.name` qualified lookup
+- [x] `$_this_dir`, `$(dirname $0)` path resolution
+- [x] Strings/comments excluded via the existing `syntax-propertize`
+- [x] Verified on pat-postgres-ssl/scripts/migrate: 269/269 references
+      to lib.ysh procs/funcs resolve only to lib.ysh
+- [ ] `xref-find-references` uses xref's default grep implementation;
+      not exercised by tests (sandbox blocks the shell it spawns)
+
 ## File Structure
 
 ```

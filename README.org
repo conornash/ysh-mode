@@ -4,3 +4,38 @@
   (use-package ysh-mode
     :straight (:host github :repo "conornash/ysh-mode"))
 #+end_src
+
+** Jump to definition (xref)
+=ysh-mode= and =ysh-ts-mode= register an xref backend, so the standard
+commands work with no extra setup and no language server:
+
+| Key       | Command                      |
+|-----------+------------------------------|
+| =M-.=     | =xref-find-definitions=      |
+| =M-,=     | =xref-go-back=               |
+| =C-u M-.= | prompt for an identifier     |
+| =C-M-.=   | =xref-find-apropos=          |
+| =M-?=     | =xref-find-references= (grep) |
+
+Recognised definitions: =proc=, =func=, shell-style =name() { }=,
+=var= / =const= (including =var a, b = ...=), proc/func parameters,
+=for= loop variables, and module names introduced by =use=.
+
+Lookup is scope-aware: inside a proc/func its own locals win (nearest
+preceding definition), then top-level definitions in the buffer, then
+files brought into scope by =source= (followed transitively) or
+=use ... --pick NAME=.  =mod my-proc= and =mod.name= are looked up in
+the module loaded by =use .../mod.ysh=.  Paths using =$_this_dir= or
+=$(dirname $0)= are resolved relative to the script.  If nothing is
+found, other =.ysh= files in the project are searched (disable with
+=ysh-xref-search-project=).  Matches inside strings and comments are
+ignored.
+
+*** Eglot
+Not required.  If you have a YSH language server, Eglot works as usual
+and its xref backend takes precedence while it manages the buffer:
+#+BEGIN_SRC emacs-lisp
+  (with-eval-after-load 'eglot
+    (add-to-list 'eglot-server-programs
+                 '((ysh-mode ysh-ts-mode) . ("your-ysh-lsp" "--stdio"))))
+#+end_src

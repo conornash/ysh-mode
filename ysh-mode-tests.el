@@ -1437,5 +1437,288 @@ From testdata/minimal.ysh: 'echo bad $00 $1a'."
     ;; $1 is var-sub but 'a' should NOT be
     (should-not (ysh-test--has-face text 12 'ysh-var-sub-face))))
 
+;; =====================================================================
+;; Xref: jump to definition
+;; =====================================================================
+
+(defun ysh-test--xref-loc (item)
+  "Return (FILE-OR-nil . LINE) for the xref ITEM.
+FILE is nil for locations in a buffer (the scanned buffer itself)."
+  (let ((loc (xref-item-location item)))
+    (if (xref-buffer-location-p loc)
+        (let ((m (xref-location-marker loc)))
+          (cons nil (with-current-buffer (marker-buffer m)
+                      (line-number-at-pos m))))
+      (cons (file-name-nondirectory (xref-location-group loc))
+            (xref-location-line loc)))))
+
+(defun ysh-test--xref-at (needle &optional nth)
+  "Return definitions for the identifier at the NTH occurrence of NEEDLE.
+Point is placed at the start of the match.  Result is a list of
+\(FILE-OR-nil . LINE), see `ysh-test--xref-loc'."
+  (goto-char (point-min))
+  (search-forward needle nil nil (or nth 1))
+  (goto-char (match-beginning 0))
+  (let ((id (xref-backend-identifier-at-point 'ysh)))
+    (and id (mapcar #'ysh-test--xref-loc
+                    (xref-backend-definitions 'ysh id)))))
+
+(defmacro ysh-test--with-xref-buffer (text &rest body)
+  "Run BODY in a `ysh-mode' buffer holding TEXT, project search off."
+  (declare (indent 1))
+  `(let ((ysh-xref-search-project nil))
+     (with-temp-buffer
+       (insert ,text)
+       (ysh-mode)
+       ,@body)))
+
+(defmacro ysh-test--with-files (spec &rest body)
+  "Create files from SPEC ((REL . CONTENT) ...) in a temp dir, run BODY.
+BODY runs with `dir' bound to the directory; it is deleted afterwards
+along with any buffers visiting files inside it."
+  (declare (indent 1))
+  `(let ((dir (file-name-as-directory (make-temp-file "ysh-xref" t))))
+     (unwind-protect
+         (progn
+           (dolist (f ,spec)
+             (let ((path (expand-file-name (car f) dir)))
+               (make-directory (file-name-directory path) t)
+               (with-temp-file path (insert (cdr f)))))
+           ,@body)
+       (dolist (b (buffer-list))
+         (let ((fn (buffer-file-name b)))
+           (when (and fn (string-prefix-p (file-truename dir)
+                                          (file-truename fn)))
+             (with-current-buffer b (set-buffer-modified-p nil))
+             (kill-buffer b))))
+       (delete-directory dir t))))
+
+(defconst ysh-test--xref-text
+  "const GREETING = 'hi'    # proc fake { }
+var a, b = 1, 2
+
+proc greet (name, ...rest; ; block=null) {
+  var msg = \"$GREETING $name\"
+  echo $msg ${name}
+  for i, item in (rest) {
+    echo $i $item
+  }
+  call addOne(a)
+  my-shfunc
+}
+
+func addOne(x) {
+  var msg = x + 1
+  var y = x-1
+  return (msg)
+}
+
+my-shfunc() {
+  echo sh
+}
+
+echo 'proc notreal { }'
+greet world
+"
+  "Buffer used by the single-file xref tests.  Line numbers matter.")
+
+(ert-deftest ysh-xref/backend-active ()
+  "ysh-mode installs the ysh xref backend."
+  (ysh-test--with-xref-buffer "echo hi"
+    (should (eq (xref-find-backend) 'ysh))))
+
+(ert-deftest ysh-xref/proc-and-func ()
+  "Calls jump to proc and func definitions."
+  (ysh-test--with-xref-buffer ysh-test--xref-text
+    (should (equal (ysh-test--xref-at "greet world") '((nil . 4))))
+    (should (equal (ysh-test--xref-at "addOne(a)") '((nil . 14))))))
+
+(ert-deftest ysh-xref/shell-function ()
+  "NAME() { ... } is a definition; hyphenated names are one identifier."
+  (ysh-test--with-xref-buffer ysh-test--xref-text
+    (should (equal (ysh-test--xref-at "my-shfunc") '((nil . 20))))))
+
+(ert-deftest ysh-xref/const-and-multi-var ()
+  "Top-level const and `var a, b' are definitions."
+  (ysh-test--with-xref-buffer ysh-test--xref-text
+    (should (equal (ysh-test--xref-at "$GREETING") '((nil . 1))))
+    ;; the `a' in addOne(a)
+    (goto-char (point-min))
+    (search-forward "(a)")
+    (goto-char (1+ (match-beginning 0)))
+    (should (equal (mapcar #'ysh-test--xref-loc
+                           (xref-backend-definitions
+                            'ysh (xref-backend-identifier-at-point 'ysh)))
+                   '((nil . 2))))))
+
+(ert-deftest ysh-xref/params ()
+  "Proc parameters, including `...rest' and `${name}', are definitions."
+  (ysh-test--with-xref-buffer ysh-test--xref-text
+    (should (equal (ysh-test--xref-at "$name\"") '((nil . 4))))
+    (should (equal (ysh-test--xref-at "${name}") '((nil . 4))))
+    (should (equal (ysh-test--xref-at "rest)") '((nil . 4))))))
+
+(ert-deftest ysh-xref/for-loop-vars ()
+  "`for i, item in' defines both names."
+  (ysh-test--with-xref-buffer ysh-test--xref-text
+    (should (equal (ysh-test--xref-at "$item") '((nil . 7))))
+    (should (equal (ysh-test--xref-at "$i ") '((nil . 7))))))
+
+(ert-deftest ysh-xref/locals-are-scoped ()
+  "`msg' resolves to the var in the enclosing proc/func, not the other."
+  (ysh-test--with-xref-buffer ysh-test--xref-text
+    (should (equal (ysh-test--xref-at "$msg") '((nil . 5))))
+    (should (equal (ysh-test--xref-at "msg)") '((nil . 15))))))
+
+(ert-deftest ysh-xref/hyphen-in-expression ()
+  "In `x-1' the identifier at x falls back to the hyphen-free word."
+  (ysh-test--with-xref-buffer ysh-test--xref-text
+    (should (equal (ysh-test--xref-at "x-1") '((nil . 14))))))
+
+(ert-deftest ysh-xref/ignores-strings-and-comments ()
+  "Definitions inside strings and comments are not definitions."
+  (ysh-test--with-xref-buffer ysh-test--xref-text
+    (should-not (ysh-test--xref-at "notreal"))
+    (should-not (ysh-test--xref-at "fake"))))
+
+(ert-deftest ysh-xref/nearest-preceding-local ()
+  "With two loop vars of the same name, the nearest preceding one wins."
+  (ysh-test--with-xref-buffer "proc p {
+  for x in (a) { echo $x }
+  for x in (b) { echo $x }
+}
+"
+    (should (equal (ysh-test--xref-at "$x" 1) '((nil . 2))))
+    (should (equal (ysh-test--xref-at "$x" 2) '((nil . 3))))))
+
+(ert-deftest ysh-xref/xref-find-definitions-moves-point ()
+  "End to end: M-. moves point to the definition."
+  (ysh-test--with-xref-buffer "proc hello {\n  echo hi\n}\nhello\n"
+    (goto-char (point-max))
+    (forward-line -1)
+    (let ((xref-prompt-for-identifier nil))
+      (xref-find-definitions (xref-backend-identifier-at-point 'ysh)))
+    (should (= (line-number-at-pos) 1))
+    (should (looking-at "hello"))))
+
+(ert-deftest ysh-xref/completion-table ()
+  "The identifier completion table lists definitions."
+  (ysh-test--with-xref-buffer ysh-test--xref-text
+    (let ((names (xref-backend-identifier-completion-table 'ysh)))
+      (dolist (n '("greet" "addOne" "GREETING" "msg" "my-shfunc"))
+        (should (member n names))))))
+
+(ert-deftest ysh-xref/source-this-dir ()
+  "`source $_this_dir/...' brings the file's top-level defs into scope."
+  (ysh-test--with-files
+      '(("main.ysh" . "source $_this_dir/lib/util.ysh\nhelper x\n")
+        ("lib/util.ysh" . "\n\nproc helper (s) {\n  echo $s\n}\n"))
+    (let ((ysh-xref-search-project nil))
+      (with-current-buffer (find-file-noselect (expand-file-name "main.ysh" dir))
+        (ysh-mode)
+        (should (equal (ysh-test--xref-at "helper x") '(("util.ysh" . 3))))))))
+
+(ert-deftest ysh-xref/source-dirname-0 ()
+  "`source $(dirname $0)/lib.ysh' resolves relative to the script."
+  (ysh-test--with-files
+      '(("bin/main.ysh" . "source $(dirname $0)/lib.ysh
+source \"$(dirname \"$0\")/lib2.ysh\"
+one
+two
+")
+        ("bin/lib.ysh" . "proc one { echo }\n")
+        ("bin/lib2.ysh" . "\nproc two { echo }\n"))
+    (let ((ysh-xref-search-project nil)
+          (default-directory temporary-file-directory))
+      (with-current-buffer (find-file-noselect
+                            (expand-file-name "bin/main.ysh" dir))
+        (ysh-mode)
+        (should (equal (ysh-test--xref-at "one\n") '(("lib.ysh" . 1))))
+        (should (equal (ysh-test--xref-at "two\n") '(("lib2.ysh" . 2))))))))
+
+(ert-deftest ysh-xref/use-extern-is-not-a-file ()
+  "`use --extern grep' neither errors nor defines a module."
+  (ysh-test--with-xref-buffer "use --extern grep sed\ngrep x\n"
+    (should-not (ysh-test--xref-at "grep x"))))
+
+(ert-deftest ysh-xref/source-is-transitive ()
+  "Files sourced by sourced files are followed."
+  (ysh-test--with-files
+      '(("main.ysh" . "source a.ysh\ndeep\n")
+        ("a.ysh" . "source $_this_dir/b.ysh\n")
+        ("b.ysh" . "proc deep { echo }\n"))
+    (let ((ysh-xref-search-project nil))
+      (with-current-buffer (find-file-noselect (expand-file-name "main.ysh" dir))
+        (ysh-mode)
+        (should (equal (ysh-test--xref-at "deep") '(("b.ysh" . 1))))))))
+
+(ert-deftest ysh-xref/use-module ()
+  "`use' defines the module name (jumps to the file); `mod NAME' looks
+NAME up in that module, even if a sourced file defines it too."
+  (ysh-test--with-files
+      '(("main.ysh" . "source $_this_dir/util.ysh
+use $_this_dir/lib/mymod.ysh
+helper 1
+mymod helper
+")
+        ("util.ysh" . "proc helper { echo util }\n")
+        ("lib/mymod.ysh" . "\nproc helper { echo mod }\n"))
+    (let ((ysh-xref-search-project nil))
+      (with-current-buffer (find-file-noselect (expand-file-name "main.ysh" dir))
+        (ysh-mode)
+        ;; Unqualified: only the sourced definition is in scope.
+        (should (equal (ysh-test--xref-at "helper 1") '(("util.ysh" . 1))))
+        ;; Qualified by the module.
+        (should (equal (ysh-test--xref-at "helper" 2) '(("mymod.ysh" . 2))))
+        ;; The module name itself.
+        (should (equal (ysh-test--xref-at "mymod helper") '(("mymod.ysh" . 1))))))))
+
+(ert-deftest ysh-xref/use-pick ()
+  "`use FILE --pick NAME' brings NAME into scope unqualified."
+  (ysh-test--with-files
+      '(("main.ysh" . "use $_this_dir/m.ysh --pick one\none\n")
+        ("m.ysh" . "proc one { echo }\n"))
+    (let ((ysh-xref-search-project nil))
+      (with-current-buffer (find-file-noselect (expand-file-name "main.ysh" dir))
+        (ysh-mode)
+        (should (equal (ysh-test--xref-at "one\n") '(("m.ysh" . 1))))))))
+
+(ert-deftest ysh-xref/visited-buffer-unsaved-edits ()
+  "A sourced file that is visited is scanned from its buffer."
+  (ysh-test--with-files
+      '(("main.ysh" . "source $_this_dir/u.ysh\nlater\n")
+        ("u.ysh" . "proc later { echo }\n"))
+    (let ((ysh-xref-search-project nil))
+      (with-current-buffer (find-file-noselect (expand-file-name "u.ysh" dir))
+        (goto-char (point-min))
+        (insert "\n\n"))                ; unsaved: proc moves to line 3
+      (with-current-buffer (find-file-noselect (expand-file-name "main.ysh" dir))
+        (ysh-mode)
+        (should (equal (ysh-test--xref-at "later") '((nil . 3))))))))
+
+(ert-deftest ysh-xref/project-fallback ()
+  "With nothing in scope, other .ysh files in the directory are searched."
+  (ysh-test--with-files
+      '(("main.ysh" . "elsewhere\n")
+        ("other.ysh" . "\nproc elsewhere { echo }\n"))
+    (with-current-buffer (find-file-noselect (expand-file-name "main.ysh" dir))
+      (ysh-mode)
+      (let ((ysh-xref-search-project t))
+        (should (equal (ysh-test--xref-at "elsewhere") '(("other.ysh" . 2)))))
+      (let ((ysh-xref-search-project nil))
+        (should-not (ysh-test--xref-at "elsewhere"))))))
+
+(ert-deftest ysh-xref/ts-mode ()
+  "ysh-ts-mode uses the same backend."
+  (skip-unless (and (require 'treesit nil t) (treesit-ready-p 'ysh t)))
+  (require 'ysh-ts-mode)
+  (let ((ysh-xref-search-project nil))
+    (with-temp-buffer
+      (insert ysh-test--xref-text)
+      (ysh-ts-mode)
+      (should (eq (xref-find-backend) 'ysh))
+      (should (equal (ysh-test--xref-at "$msg") '((nil . 5))))
+      (should-not (ysh-test--xref-at "notreal")))))
+
 (provide 'ysh-mode-tests)
 ;;; ysh-mode-tests.el ends here

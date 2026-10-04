@@ -22,6 +22,7 @@
 ;;; Code:
 
 (require 'treesit)
+(require 'ysh-mode)                     ; xref backend (M-.)
 
 (declare-function treesit-parser-create "treesit.c")
 
@@ -220,6 +221,9 @@ https://github.com/danyspin97/tree-sitter-ysh
   ;; Comments
   (setq-local comment-start "# ")
   (setq-local comment-end "")
+
+  ;; Jump to definition (M-.)
+  (add-hook 'xref-backend-functions #'ysh-xref-backend nil t)
 
   (treesit-major-mode-setup))
 
